@@ -1,0 +1,2 @@
+# TeamTask
+TeamTask Agent V1 is a task recognition and progress reconciliation assistant designed for Feishu team collaboration. It extracts tasks from meeting notes, group chats, and document comments, then writes them into a shared task board after human confirmation. Through personal responsibility views and reconciliation reminders, it helps teams clearly track ownership, progress, and upstream/downstream dependencies.
