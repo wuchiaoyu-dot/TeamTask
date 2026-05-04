@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+.env
+*.db
+teamtask_agent.db
+*.log
+logs/
+pytest-cache-files-*/
