@@ -1,5 +1,21 @@
 # TeamTask Agent Architecture
 
+## Mermaid Architecture Diagram
+
+```mermaid
+flowchart LR
+  A["Feishu Group / Minutes / Docs"] --> B["Event Adapter"]
+  B --> C["Task Extractor"]
+  C --> D["Task Contract Ledger"]
+  D --> E["Confirm Cards"]
+  E --> F["Todo Projection"]
+  F --> G["Progress Query"]
+  G --> H["Reconciliation"]
+  H --> I["Bitable"]
+  H --> J["OpenClaw"]
+  J --> B
+```
+
 ## 1. 总体架构
 
 TeamTask Agent 是一个 FastAPI 后端，连接飞书事件、飞书卡片、OpenClaw 自然语言入口、任务合同账本、个人 Todo Projection、资源推荐和进度对账。系统默认运行在 `local_mock`，真实读写必须显式开启并通过白名单与授权校验。
