@@ -1,0 +1,14 @@
+[
+  {
+    "user_id": "u_initiator",
+    "display_name": "Initiator Demo User",
+    "roles": ["initiator", "allowed_trial_user"],
+    "scopes": ["minutes:read", "docs:read", "drive:read", "base:read", "progress_reconcile"]
+  },
+  {
+    "user_id": "u_assignee",
+    "display_name": "Assignee Demo User",
+    "roles": ["assignee", "allowed_trial_user"],
+    "scopes": ["minutes:read", "docs:read", "drive:read", "base:read", "progress_reconcile"]
+  }
+]

@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from datetime import date
 
 from fastapi import Depends, FastAPI, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from app.cards import (
@@ -17,25 +17,53 @@ from app.cards import (
     build_progress_confirm_card,
     build_progress_reply_payload,
     build_progress_task_select_card,
+    build_reconciliation_summary_card,
 )
 from app.clients import create_feishu_client
-from app.config import get_settings
+from app.config import get_settings, validate_bitable_config, validate_env_profile, validate_real_read_config
+from app.core.access_guard import (
+    assert_chat_allowed,
+    assert_user_allowed,
+    should_enforce_event_access,
+    should_enforce_real_read_access,
+    should_enforce_real_write_access,
+)
+from app.core.external_read_guard import should_allow_external_read
+from app.core.external_write_guard import should_allow_external_write
 from app.core.permissions import (
     can_confirm_as_assignee,
     can_confirm_as_initiator,
     can_reconcile_pair,
 )
 from app.db import get_db, init_db
-from app.models import ChangeProposal, PersonalTodoProjection, ProgressQuery, SourceEvent, TaskContract, utc_now
+from app.models import (
+    ChangeProposal,
+    PersonalTodoProjection,
+    ProgressQuery,
+    ReconciliationItem,
+    ReconciliationRun,
+    SourceEvent,
+    TaskContract,
+    utc_now,
+)
 from app.schemas.api import (
     AssigneeChangeIn,
     ContractActionIn,
+    DailyReconciliationRunIn,
+    DebugBitableCreateRealIn,
     DebugBitableDryRunCreateIn,
+    DebugBitableGetRecordIn,
+    DebugBitableUpdateRecordIn,
     DebugMinutesExtractTasksIn,
     DebugMinutesParseLinkIn,
+    DebugMinutesReadRealIn,
     DebugProgressConfirmIn,
     DebugProgressQueryIn,
+    DebugAuthScopesIn,
+    DebugReconciliationApplyActionIn,
+    DebugReconciliationRunIn,
     DebugResourceBuildQueriesIn,
+    DebugResourceSearchRealIn,
     DebugResourceSearchIn,
     DevAuthGrantIn,
     EventIn,
@@ -55,6 +83,7 @@ from app.services.feishu_security import (
     validate_card_token,
     validate_event_token,
 )
+from app.services.auth_scope_service import current_grants, explain_missing_scopes, has_required_scopes
 from app.services.event_router import extract_task_candidate, route_source_event
 from app.services.task_service import (
     create_auth_grant,
@@ -69,9 +98,13 @@ from app.services.task_service import (
     get_or_create_user,
     record_card_action,
 )
-from app.services.todo_backend import create_todo_backend
-from app.services.todo_field_mapper import map_contract_to_bitable_fields
-from app.services.minutes_backend import create_minutes_backend
+from app.services.todo_backend import BitableTodoBackend, create_todo_backend
+from app.services.todo_field_mapper import (
+    map_bitable_record_to_snapshot,
+    map_contract_to_bitable_fields,
+    map_patch_to_bitable_fields,
+)
+from app.services.minutes_backend import MinutesContent, create_minutes_backend
 from app.services.minutes_link_parser import extract_minutes_token, extract_minutes_url, is_minutes_link
 from app.services.minutes_preprocessor import normalize_minutes_content
 from app.services.progress_query_service import (
@@ -87,6 +120,10 @@ from app.services.progress_query_service import (
     detect_progress_query,
     extract_progress_query_entities,
     match_task_contract,
+)
+from app.services.reconciliation_service import (
+    apply_reconciliation_action,
+    start_reconciliation,
 )
 from app.services.resource_ranker import build_resource_queries
 from app.services.resource_search_backend import ResourceSearchResult, create_resource_search_backend
@@ -111,6 +148,11 @@ INITIATOR_ACTIONS = {
     "progress_select_task",
     "change_proposal_approve",
     "change_proposal_reject",
+    "reconciliation_approve_change",
+    "reconciliation_reject_change",
+    "reconciliation_merge_resources",
+    "reconciliation_ignore_diff",
+    "reconciliation_request_more_info",
 }
 ASSIGNEE_ACTIONS = {
     "assignee_accept",
@@ -123,6 +165,9 @@ ASSIGNEE_ACTIONS = {
     "progress_mark_delayed",
     "progress_mark_blocked",
     "progress_no_such_task",
+    "reconciliation_sync_progress",
+    "reconciliation_ignore_diff",
+    "reconciliation_request_more_info",
 }
 CALLBACK_ACTION_KEYS = INITIATOR_ACTIONS | ASSIGNEE_ACTIONS
 
@@ -140,7 +185,105 @@ feishu_client = create_feishu_client()
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok"}
+    settings = get_settings()
+    return {
+        "status": "ok",
+        "env_profile": settings.env_profile,
+        "feishu_mock": settings.feishu_mock,
+        "lark_dry_run": settings.lark_dry_run,
+        "real_read_enabled": settings.feishu_enable_real_read,
+        "todo_backend": settings.todo_backend,
+        "minutes_backend": settings.minutes_backend,
+        "resource_search_backend": settings.resource_search_backend,
+    }
+
+
+@app.get("/readiness")
+def readiness(db: Session = Depends(get_db)) -> dict:
+    settings = get_settings()
+    warnings: list[str] = []
+    database_ok = True
+    try:
+        db.execute(text("SELECT 1"))
+    except Exception as exc:
+        database_ok = False
+        warnings.append(f"database check failed: {exc}")
+
+    config_ok = True
+    try:
+        validate_env_profile(settings)
+    except ValueError as exc:
+        config_ok = False
+        warnings.append(str(exc))
+
+    bitable_config_ok = True
+    try:
+        validate_bitable_config(settings)
+    except ValueError as exc:
+        bitable_config_ok = False
+        warnings.append(str(exc))
+
+    real_read_config_ok = True
+    try:
+        validate_real_read_config(settings)
+    except ValueError as exc:
+        real_read_config_ok = False
+        warnings.append(str(exc))
+
+    feishu_callback_config_ok = settings.feishu_mock or bool(
+        os.getenv("FEISHU_VERIFICATION_TOKEN") and os.getenv("FEISHU_CARD_VERIFICATION_TOKEN")
+    )
+    if not feishu_callback_config_ok:
+        warnings.append("Feishu verification tokens are not fully configured")
+
+    allowed_users_configured = bool(settings.allowed_user_ids)
+    if settings.env_profile == "production_trial" and not allowed_users_configured:
+        warnings.append("production_trial requires ALLOWED_USER_IDS")
+    if settings.env_profile == "production_trial" and not settings.allowed_chat_ids:
+        warnings.append("production_trial should configure ALLOWED_CHAT_IDS for group entrypoints")
+
+    return {
+        "database_ok": database_ok,
+        "config_ok": config_ok,
+        "bitable_config_ok": bitable_config_ok,
+        "real_read_config_ok": real_read_config_ok,
+        "feishu_callback_config_ok": feishu_callback_config_ok,
+        "allowed_users_configured": allowed_users_configured,
+        "warnings": warnings,
+    }
+
+
+@app.get("/debug/system/status")
+def debug_system_status() -> dict:
+    settings = get_settings()
+    return {
+        "env_profile": settings.env_profile,
+        "runtime": {
+            "feishu_mock": settings.feishu_mock,
+            "lark_dry_run": settings.lark_dry_run,
+            "real_read_enabled": settings.feishu_enable_real_read,
+            "todo_backend": settings.todo_backend,
+            "minutes_backend": settings.minutes_backend,
+            "resource_search_backend": settings.resource_search_backend,
+        },
+        "configured": {
+            "feishu_app_id": bool(settings.feishu_app_id),
+            "feishu_app_secret": bool(settings.feishu_app_secret),
+            "feishu_verification_token": bool(os.getenv("FEISHU_VERIFICATION_TOKEN")),
+            "feishu_card_verification_token": bool(os.getenv("FEISHU_CARD_VERIFICATION_TOKEN")),
+            "bitable_app_token": bool(settings.feishu_bitable_app_token),
+            "bitable_table_id": bool(settings.feishu_bitable_table_id),
+            "lark_cli_path": bool(settings.lark_cli_path),
+            "allowed_user_count": len(settings.allowed_user_ids),
+            "allowed_chat_count": len(settings.allowed_chat_ids),
+        },
+        "guards": {
+            "external_read_allowed": should_allow_external_read(settings),
+            "external_write_allowed": should_allow_external_write(settings),
+            "real_read_whitelist_enabled": settings.enable_real_read_for_allowed_users_only,
+            "real_write_whitelist_enabled": settings.enable_real_write_for_allowed_users_only,
+        },
+    }
 
 
 @app.post("/feishu/events")
@@ -156,6 +299,10 @@ def feishu_events(payload: dict, db: Session = Depends(get_db)) -> dict:
 
     if _is_simulated_feishu_event(payload):
         simulated = FeishuEventIn.model_validate(payload)
+        settings = get_settings()
+        if should_enforce_event_access(settings):
+            assert_user_allowed(simulated.sender_user_id, settings)
+            assert_chat_allowed(simulated.chat_id, settings)
         existing_event = find_source_event_by_external_id(db, simulated.event_id)
         if existing_event:
             return _source_event_response(existing_event, db, deduplicated=True)
@@ -167,6 +314,10 @@ def feishu_events(payload: dict, db: Session = Depends(get_db)) -> dict:
     adapted = adapt_feishu_event(payload)
     if not adapted.external_event_id:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Missing external event id")
+    settings = get_settings()
+    if should_enforce_event_access(settings):
+        assert_user_allowed(adapted.trigger_user_id, settings)
+        assert_chat_allowed(adapted.chat_id, settings)
 
     existing_event = find_source_event_by_external_id(db, adapted.external_event_id)
     if existing_event:
@@ -201,9 +352,16 @@ def feishu_card_callback(payload: dict, db: Session = Depends(get_db)) -> dict:
             progress_text=action.form_value.get("progress_text"),
             progress_query_id=action.form_value.get("progress_query_id"),
             new_deadline=action.form_value.get("new_deadline"),
+            reconciliation_item_id=action.form_value.get("reconciliation_item_id"),
+            field_name=action.form_value.get("field_name"),
+            resolution_value=action.form_value.get("resolution_value"),
             proposal_id=action.form_value.get("proposal_id"),
             payload={"source_event_id": action.source_event_id, "raw_payload": action.raw_payload},
         )
+
+    settings = get_settings()
+    if should_enforce_event_access(settings):
+        assert_user_allowed(callback.recipient_user_id, settings)
 
     if callback.action_key not in ALLOWED_CARD_ACTION_KEYS:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unknown card action_key")
@@ -261,6 +419,15 @@ def feishu_card_callback(payload: dict, db: Session = Depends(get_db)) -> dict:
             progress_query_id=callback.progress_query_id,
             progress_text=callback.progress_text or callback.progress_summary or callback.reason,
             new_deadline=callback.new_deadline or callback.deadline,
+        )
+    if callback.action_key.startswith("reconciliation_"):
+        return _handle_reconciliation_action(
+            actor_user_id=callback.recipient_user_id,
+            db=db,
+            action_key=callback.action_key,
+            reconciliation_item_id=callback.reconciliation_item_id,
+            field_name=callback.field_name,
+            resolution_value=callback.resolution_value,
         )
     if callback.action_key == "change_proposal_approve":
         return _handle_change_proposal_review(
@@ -427,6 +594,85 @@ def debug_bitable_dry_run_create(payload: DebugBitableDryRunCreateIn, db: Sessio
     }
 
 
+@app.post("/debug/bitable/create-real")
+def debug_bitable_create_real(payload: DebugBitableCreateRealIn, db: Session = Depends(get_db)) -> dict:
+    contract = _get_contract(db, payload.contract_id)
+    role = payload.role
+    if role not in {"initiator", "assignee"}:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="role must be initiator or assignee")
+    if payload.owner_user_id not in {contract.initiator_user_id, contract.assignee_user_id}:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Owner is not part of this task contract")
+    settings = get_settings()
+    if should_enforce_real_write_access(settings):
+        assert_user_allowed(payload.owner_user_id, settings)
+    fields = map_contract_to_bitable_fields(payload.owner_user_id, contract, role, settings)
+    allowed = should_allow_external_write(settings)
+    if not allowed:
+        return {
+            "contract_id": contract.id,
+            "owner_user_id": payload.owner_user_id,
+            "role": role,
+            "would_write": True,
+            "external_write_allowed": False,
+            "fields": fields,
+            "record_id": f"dry_run_record_{payload.owner_user_id}_{contract.id}_{role}",
+        }
+    backend = BitableTodoBackend(settings=settings)
+    record_id = backend.create_personal_todo_projection(payload.owner_user_id, contract, role)
+    return {
+        "contract_id": contract.id,
+        "owner_user_id": payload.owner_user_id,
+        "role": role,
+        "would_write": True,
+        "external_write_allowed": True,
+        "fields": fields,
+        "record_id": record_id,
+    }
+
+
+@app.post("/debug/bitable/get-record")
+def debug_bitable_get_record(payload: DebugBitableGetRecordIn) -> dict:
+    settings = get_settings()
+    if settings.feishu_mock or settings.lark_dry_run:
+        raw_record = {
+            "record_id": payload.external_record_id,
+            "fields": {},
+            "dry_run": True,
+            "owner_user_id": payload.owner_user_id,
+        }
+        return {"raw_record": raw_record, "mapped_snapshot": map_bitable_record_to_snapshot(raw_record, settings)}
+    backend = BitableTodoBackend(settings=settings)
+    try:
+        raw_record = backend.get_personal_todo(payload.owner_user_id, payload.external_record_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return {"raw_record": raw_record, "mapped_snapshot": map_bitable_record_to_snapshot(raw_record, settings)}
+
+
+@app.post("/debug/bitable/update-record")
+def debug_bitable_update_record(payload: DebugBitableUpdateRecordIn) -> dict:
+    settings = get_settings()
+    fields = map_patch_to_bitable_fields(payload.patch, settings)
+    if settings.feishu_mock or settings.lark_dry_run or not should_allow_external_write(settings):
+        raw_record = {"record_id": payload.external_record_id, "fields": fields, "dry_run": True}
+        return {
+            "updated_fields": fields,
+            "mapped_snapshot": map_bitable_record_to_snapshot(raw_record, settings),
+            "external_write_allowed": False,
+        }
+    backend = BitableTodoBackend(settings=settings)
+    try:
+        backend.update_personal_todo_projection(payload.owner_user_id, payload.external_record_id, payload.patch)
+        raw_record = backend.get_personal_todo(payload.owner_user_id, payload.external_record_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    return {
+        "updated_fields": fields,
+        "mapped_snapshot": map_bitable_record_to_snapshot(raw_record, settings),
+        "external_write_allowed": True,
+    }
+
+
 @app.post("/debug/minutes/parse-link")
 def debug_minutes_parse_link(payload: DebugMinutesParseLinkIn) -> dict:
     return {
@@ -467,6 +713,36 @@ def debug_minutes_extract_tasks(payload: DebugMinutesExtractTasksIn) -> dict:
     }
 
 
+@app.post("/debug/minutes/read-real")
+def debug_minutes_read_real(payload: DebugMinutesReadRealIn, db: Session = Depends(get_db)) -> dict:
+    settings = get_settings()
+    if should_enforce_real_read_access(settings):
+        assert_user_allowed(payload.user_id, settings)
+    required_scopes = list(settings.feishu_minutes_scope_required)
+    missing_scopes = explain_missing_scopes(db, payload.user_id, required_scopes)
+    allowed = should_allow_external_read(settings) and not missing_scopes
+    response = {
+        "would_read": True,
+        "allowed": allowed,
+        "missing_scopes": missing_scopes,
+        "minutes_content": None,
+        "error": None,
+    }
+    if settings.feishu_mock or (missing_scopes and should_allow_external_read(settings)):
+        response["error"] = "Real minutes read is not allowed; use mock mode or grant required scopes."
+        return response
+    if missing_scopes:
+        response["error"] = "Missing required scopes for minutes read."
+        return response
+    try:
+        content = create_minutes_backend(settings).get_minutes_content(payload.minutes_token_or_url)
+    except Exception as exc:
+        response["error"] = f"Failed to read minutes. Please paste meeting notes manually. {exc}"
+        return response
+    response["minutes_content"] = _minutes_content_response(content)
+    return response
+
+
 @app.post("/debug/resources/search")
 def debug_resources_search(payload: DebugResourceSearchIn, db: Session = Depends(get_db)) -> dict:
     contract = _get_contract(db, payload.contract_id)
@@ -486,6 +762,67 @@ def debug_resources_build_queries(payload: DebugResourceBuildQueriesIn, db: Sess
         "mentioned_resources": contract.mentioned_resources,
         "project_name": contract.project_name,
         "evidence": contract.evidence,
+    }
+
+
+@app.post("/debug/resources/search-real")
+def debug_resources_search_real(payload: DebugResourceSearchRealIn, db: Session = Depends(get_db)) -> dict:
+    settings = get_settings()
+    if should_enforce_real_read_access(settings):
+        assert_user_allowed(payload.user_id, settings)
+    contract = _get_contract(db, payload.contract_id)
+    required_scopes = _resource_required_scopes(settings)
+    missing_scopes = explain_missing_scopes(db, payload.user_id, required_scopes)
+    allowed = should_allow_external_read(settings) and not missing_scopes
+    queries = build_resource_queries(contract, contract.source_event, settings)
+    response: dict = {
+        "would_search": True,
+        "allowed": allowed,
+        "missing_scopes": missing_scopes,
+        "search_queries": queries,
+        "high_confidence": [],
+        "low_confidence": [],
+        "raw_results": [],
+        "error": None,
+    }
+    if missing_scopes:
+        response["error"] = "Missing required scopes for resource search."
+        return response
+    try:
+        result = create_resource_search_backend(feishu_client, settings).search_resources(
+            payload.user_id,
+            contract,
+            contract.source_event,
+        )
+    except Exception as exc:
+        contract.resource_search_status = "failed"
+        contract.resource_search_error = str(exc)
+        db.commit()
+        response["error"] = str(exc)
+        return response
+    response.update(_resource_result_response(result))
+    if payload.write_back:
+        contract.related_resources_json = {
+            "high_confidence": result.high_confidence,
+            "low_confidence": result.low_confidence,
+            "backend": result.backend,
+            "dry_run": result.dry_run,
+            "search_queries": result.search_queries,
+        }
+        contract.resource_search_status = "completed"
+        contract.resource_search_error = None
+        db.commit()
+    return response
+
+
+@app.post("/debug/auth/scopes")
+def debug_auth_scopes(payload: DebugAuthScopesIn, db: Session = Depends(get_db)) -> dict:
+    return {
+        "user_id": payload.user_id,
+        "required_scopes": payload.required_scopes,
+        "has_required_scopes": has_required_scopes(db, payload.user_id, payload.required_scopes),
+        "missing_scopes": explain_missing_scopes(db, payload.user_id, payload.required_scopes),
+        "current_grants": current_grants(db, payload.user_id),
     }
 
 
@@ -526,6 +863,63 @@ def debug_progress_confirm(payload: DebugProgressConfirmIn, db: Session = Depend
         "response_summary": result["response_summary"],
         "generated_reply_payload": result["generated_reply_payload"],
     }
+
+
+@app.post("/debug/reconciliation/run")
+def debug_reconciliation_run(payload: DebugReconciliationRunIn, db: Session = Depends(get_db)) -> dict:
+    run = _start_reconciliation_run(
+        db=db,
+        requester_user_id=payload.requester_user_id,
+        scope=payload.scope,
+        run_type="manual",
+        contract_id=payload.contract_id,
+        assignee_user_id=payload.assignee_user_id,
+        project_name=payload.project_name,
+    )
+    db.commit()
+    db.refresh(run)
+    return _reconciliation_run_response(run)
+
+
+@app.get("/debug/reconciliation/runs/{run_id}")
+def debug_reconciliation_get_run(run_id: int, db: Session = Depends(get_db)) -> dict:
+    run = _get_reconciliation_run(db, run_id)
+    return _reconciliation_run_response(run)
+
+
+@app.post("/debug/reconciliation/apply-action")
+def debug_reconciliation_apply_action(
+    payload: DebugReconciliationApplyActionIn,
+    db: Session = Depends(get_db),
+) -> dict:
+    return _handle_reconciliation_action(
+        actor_user_id=payload.actor_user_id,
+        db=db,
+        action_key=payload.action_key,
+        reconciliation_item_id=payload.reconciliation_item_id,
+        field_name=payload.field_name,
+        resolution_value=payload.resolution_value,
+    )
+
+
+@app.post("/reconciliation/daily-run")
+def reconciliation_daily_run(payload: DailyReconciliationRunIn, db: Session = Depends(get_db)) -> dict:
+    settings = get_settings()
+    if should_enforce_real_read_access(settings):
+        assert_user_allowed(payload.requester_user_id, settings)
+        if payload.assignee_user_id:
+            assert_user_allowed(payload.assignee_user_id, settings)
+    run = _start_reconciliation_run(
+        db=db,
+        requester_user_id=payload.requester_user_id,
+        scope="project" if payload.project_name else "all_tasks",
+        run_type="daily",
+        assignee_user_id=payload.assignee_user_id,
+        project_name=payload.project_name,
+    )
+    db.commit()
+    db.refresh(run)
+    return _reconciliation_run_response(run)
 
 
 @app.post("/dev/auth-grants")
@@ -762,6 +1156,85 @@ def _handle_resource_search(actor_user_id: str, contract_id: int, db: Session, r
         "related_resources": contract.related_resources_json,
         "search_queries": result.search_queries,
         "card": card,
+    }
+
+
+def _start_reconciliation_run(
+    *,
+    db: Session,
+    requester_user_id: str,
+    scope: str,
+    run_type: str,
+    contract_id: int | None = None,
+    assignee_user_id: str | None = None,
+    project_name: str | None = None,
+) -> ReconciliationRun:
+    get_or_create_user(db, requester_user_id)
+    if assignee_user_id:
+        get_or_create_user(db, assignee_user_id)
+    run = start_reconciliation(
+        db,
+        todo_backend=create_todo_backend(feishu_client, get_settings()),
+        requester_user_id=requester_user_id,
+        scope=scope,
+        run_type=run_type,
+        contract_id=contract_id,
+        assignee_user_id=assignee_user_id,
+        project_name=project_name,
+    )
+    summary_card = build_reconciliation_summary_card(run)
+    # Store the summary card on the run response path; item cards are stored on each item.
+    run.summary = run.summary or summary_card["summary"]
+    return run
+
+
+def _handle_reconciliation_action(
+    *,
+    actor_user_id: str,
+    db: Session,
+    action_key: str,
+    reconciliation_item_id: int | None,
+    field_name: str | None,
+    resolution_value,
+) -> dict:
+    if reconciliation_item_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="reconciliation_item_id is required",
+        )
+    item = _get_reconciliation_item(db, reconciliation_item_id)
+    try:
+        result = apply_reconciliation_action(
+            db,
+            item=item,
+            action_key=action_key,
+            actor_user_id=actor_user_id,
+            field_name=field_name,
+            resolution_value=resolution_value,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+    record_card_action(
+        db,
+        action_key,
+        actor_user_id,
+        item.contract_id,
+        {
+            "reconciliation_item_id": item.id,
+            "field_name": field_name,
+            "resolution_value": resolution_value,
+        },
+    )
+    db.commit()
+    db.refresh(item)
+    return {
+        "updated_item": _reconciliation_item_response(item),
+        "updated_contract": _contract_response(item.contract),
+        "updated_projections": [
+            _projection_response(projection)
+            for projection in [item.initiator_projection, item.assignee_projection]
+            if projection is not None
+        ],
     }
 
 
@@ -1133,7 +1606,13 @@ def _ingest_source_event(
         return _source_event_response(existing_event, db, deduplicated=True)
 
     if event_type == "meeting" and not (payload.parsed_context_json or {}).get("action_sections"):
-        payload = _hydrate_minutes_payload(payload)
+        try:
+            payload = _hydrate_minutes_payload(payload)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Failed to read meeting minutes. Please paste meeting notes manually. {exc}",
+            ) from exc
 
     sender = get_or_create_user(db, payload.sender_user_id)
     for user_id in set(
@@ -1226,6 +1705,7 @@ def _event_in_from_feishu(payload: FeishuEventIn) -> EventIn:
         initiator_user_id=payload.initiator_user_id,
         assignee_user_id=payload.assignee_user_id,
         project_name=payload.project_name or metadata.get("project_name"),
+        chat_id=payload.chat_id,
         source_link=payload.minutes_token if payload.event_type == "meeting_minutes" else None,
     )
 
@@ -1301,6 +1781,60 @@ def _contract_response(contract: TaskContract) -> dict:
     }
 
 
+def _reconciliation_run_response(run: ReconciliationRun) -> dict:
+    summary_card = build_reconciliation_summary_card(run)
+    return {
+        "run_id": run.id,
+        "run": {
+            "id": run.id,
+            "requester_user_id": run.requester_user_id,
+            "initiator_user_id": run.initiator_user_id,
+            "assignee_user_id": run.assignee_user_id,
+            "contract_id": run.contract_id,
+            "scope": run.scope,
+            "run_type": run.run_type,
+            "status": run.status,
+            "summary": run.summary,
+            "error_message": run.error_message,
+        },
+        "summary": run.summary,
+        "items": [_reconciliation_item_response(item) for item in run.items],
+        "generated_cards": [
+            item.generated_card_json
+            for item in run.items
+            if item.generated_card_json
+        ],
+        "summary_card": summary_card,
+    }
+
+
+def _reconciliation_item_response(item: ReconciliationItem) -> dict:
+    return {
+        "id": item.id,
+        "run_id": item.run_id,
+        "contract_id": item.contract_id,
+        "initiator_projection_id": item.initiator_projection_id,
+        "assignee_projection_id": item.assignee_projection_id,
+        "diff_status": item.diff_status,
+        "field_diffs_json": item.field_diffs_json,
+        "generated_card_json": item.generated_card_json,
+    }
+
+
+def _projection_response(projection: PersonalTodoProjection) -> dict:
+    return {
+        "id": projection.id,
+        "contract_id": projection.contract_id,
+        "owner_user_id": projection.owner_user_id,
+        "role": projection.role,
+        "title": projection.title,
+        "description": projection.description,
+        "deadline": projection.deadline.isoformat() if projection.deadline else None,
+        "status": projection.status,
+        "snapshot_json": projection.snapshot_json,
+    }
+
+
 def _ensure_external_projection(projection: PersonalTodoProjection, contract: TaskContract) -> str:
     if projection.external_record_id:
         return projection.external_record_id
@@ -1370,6 +1904,30 @@ def _resource_result_response(result: ResourceSearchResult) -> dict:
         "backend": result.backend,
         "dry_run": result.dry_run,
     }
+
+
+def _minutes_content_response(content: MinutesContent) -> dict:
+    return {
+        "minutes_token": content.minutes_token,
+        "title": content.title,
+        "meeting_start_time": content.meeting_start_time,
+        "participants": content.participants,
+        "transcript_text": content.transcript_text,
+        "speaker_segments": content.speaker_segments,
+        "summary_text": content.summary_text,
+        "todos_text": content.todos_text,
+        "source_url": content.source_url,
+        "raw_payload": content.raw_payload,
+    }
+
+
+def _resource_required_scopes(settings) -> list[str]:
+    scopes: list[str] = []
+    scopes.extend(settings.feishu_docs_scope_required)
+    scopes.extend(settings.feishu_minutes_scope_required)
+    scopes.extend(settings.feishu_drive_scope_required)
+    scopes.extend(settings.feishu_base_scope_required)
+    return list(dict.fromkeys(scopes))
 
 
 def _refresh_local_projections(contract: TaskContract) -> None:
@@ -1512,6 +2070,20 @@ def _get_progress_query(db: Session, progress_query_id: int) -> ProgressQuery:
     if not progress_query:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Progress query not found")
     return progress_query
+
+
+def _get_reconciliation_run(db: Session, run_id: int) -> ReconciliationRun:
+    run = db.get(ReconciliationRun, run_id)
+    if not run:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Reconciliation run not found")
+    return run
+
+
+def _get_reconciliation_item(db: Session, item_id: int) -> ReconciliationItem:
+    item = db.get(ReconciliationItem, item_id)
+    if not item:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Reconciliation item not found")
+    return item
 
 
 def _get_change_proposal(db: Session, contract_id: int, proposal_id: int | None) -> ChangeProposal:

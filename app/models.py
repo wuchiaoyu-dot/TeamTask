@@ -130,6 +130,7 @@ class PersonalTodoProjection(Base, TimestampMixin):
     todo_provider: Mapped[str] = mapped_column(String(64), default="mock", nullable=False)
     external_record_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     last_synced_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    snapshot_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
     contract: Mapped[TaskContract] = relationship(back_populates="todo_projections")
     owner: Mapped[User] = relationship()
@@ -187,3 +188,53 @@ class ProgressQuery(Base, TimestampMixin):
     requester: Mapped[User] = relationship(foreign_keys=[requester_user_id])
     assignee: Mapped[User | None] = relationship(foreign_keys=[assignee_user_id])
     matched_contract: Mapped[TaskContract | None] = relationship()
+
+
+class ReconciliationRun(Base, TimestampMixin):
+    __tablename__ = "reconciliation_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    requester_user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    initiator_user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    assignee_user_id: Mapped[str | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    contract_id: Mapped[int | None] = mapped_column(ForeignKey("task_contracts.id"), nullable=True, index=True)
+    scope: Mapped[str] = mapped_column(String(64), nullable=False)
+    run_type: Mapped[str] = mapped_column(String(64), default="manual", nullable=False)
+    status: Mapped[str] = mapped_column(String(64), default="pending", nullable=False)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    requester: Mapped[User] = relationship(foreign_keys=[requester_user_id])
+    initiator: Mapped[User | None] = relationship(foreign_keys=[initiator_user_id])
+    assignee: Mapped[User | None] = relationship(foreign_keys=[assignee_user_id])
+    contract: Mapped[TaskContract | None] = relationship()
+    items: Mapped[list[ReconciliationItem]] = relationship(
+        back_populates="run",
+        cascade="all, delete-orphan",
+    )
+
+
+class ReconciliationItem(Base, TimestampMixin):
+    __tablename__ = "reconciliation_items"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("reconciliation_runs.id"), nullable=False, index=True)
+    contract_id: Mapped[int] = mapped_column(ForeignKey("task_contracts.id"), nullable=False, index=True)
+    initiator_projection_id: Mapped[int | None] = mapped_column(
+        ForeignKey("personal_todo_projections.id"),
+        nullable=True,
+        index=True,
+    )
+    assignee_projection_id: Mapped[int | None] = mapped_column(
+        ForeignKey("personal_todo_projections.id"),
+        nullable=True,
+        index=True,
+    )
+    diff_status: Mapped[str] = mapped_column(String(64), nullable=False)
+    field_diffs_json: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    generated_card_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+
+    run: Mapped[ReconciliationRun] = relationship(back_populates="items")
+    contract: Mapped[TaskContract] = relationship()
+    initiator_projection: Mapped[PersonalTodoProjection | None] = relationship(foreign_keys=[initiator_projection_id])
+    assignee_projection: Mapped[PersonalTodoProjection | None] = relationship(foreign_keys=[assignee_projection_id])

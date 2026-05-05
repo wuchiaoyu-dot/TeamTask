@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.models import ChangeProposal, ProgressQuery, TaskContract
+from app.models import ChangeProposal, ProgressQuery, ReconciliationItem, ReconciliationRun, TaskContract
 
 ACTION_INITIATOR_CONFIRM = "initiator_confirm"
 ACTION_INITIATOR_IGNORE = "initiator_ignore"
@@ -18,6 +18,12 @@ ACTION_PROGRESS_NO_SUCH_TASK = "progress_no_such_task"
 ACTION_PROGRESS_SELECT_TASK = "progress_select_task"
 ACTION_CHANGE_PROPOSAL_APPROVE = "change_proposal_approve"
 ACTION_CHANGE_PROPOSAL_REJECT = "change_proposal_reject"
+ACTION_RECONCILIATION_APPROVE_CHANGE = "reconciliation_approve_change"
+ACTION_RECONCILIATION_REJECT_CHANGE = "reconciliation_reject_change"
+ACTION_RECONCILIATION_SYNC_PROGRESS = "reconciliation_sync_progress"
+ACTION_RECONCILIATION_MERGE_RESOURCES = "reconciliation_merge_resources"
+ACTION_RECONCILIATION_IGNORE_DIFF = "reconciliation_ignore_diff"
+ACTION_RECONCILIATION_REQUEST_MORE_INFO = "reconciliation_request_more_info"
 
 ALLOWED_CARD_ACTION_KEYS = {
     ACTION_INITIATOR_CONFIRM,
@@ -36,6 +42,12 @@ ALLOWED_CARD_ACTION_KEYS = {
     ACTION_PROGRESS_SELECT_TASK,
     ACTION_CHANGE_PROPOSAL_APPROVE,
     ACTION_CHANGE_PROPOSAL_REJECT,
+    ACTION_RECONCILIATION_APPROVE_CHANGE,
+    ACTION_RECONCILIATION_REJECT_CHANGE,
+    ACTION_RECONCILIATION_SYNC_PROGRESS,
+    ACTION_RECONCILIATION_MERGE_RESOURCES,
+    ACTION_RECONCILIATION_IGNORE_DIFF,
+    ACTION_RECONCILIATION_REQUEST_MORE_INFO,
 }
 
 
@@ -251,6 +263,96 @@ def build_progress_reply_payload(progress_query: ProgressQuery, contract: TaskCo
     }
 
 
+def build_reconciliation_review_card(
+    item: ReconciliationItem,
+    contract: TaskContract,
+    recipient_user_id: str,
+) -> dict:
+    diffs = item.field_diffs_json or {}
+    actions = [
+        _reconciliation_action("Approve change", ACTION_RECONCILIATION_APPROVE_CHANGE, item, contract, recipient_user_id),
+        _reconciliation_action("Reject change", ACTION_RECONCILIATION_REJECT_CHANGE, item, contract, recipient_user_id),
+        _reconciliation_action(
+            "Sync progress",
+            ACTION_RECONCILIATION_SYNC_PROGRESS,
+            item,
+            contract,
+            recipient_user_id,
+        ),
+        _reconciliation_action(
+            "Merge resources",
+            ACTION_RECONCILIATION_MERGE_RESOURCES,
+            item,
+            contract,
+            recipient_user_id,
+        ),
+        _reconciliation_action("Ignore diff", ACTION_RECONCILIATION_IGNORE_DIFF, item, contract, recipient_user_id),
+        _reconciliation_action(
+            "Request more info",
+            ACTION_RECONCILIATION_REQUEST_MORE_INFO,
+            item,
+            contract,
+            recipient_user_id,
+        ),
+    ]
+    return {
+        "card_type": "reconciliation_review",
+        "title": "Review Todo projection differences",
+        "summary": f"{len(diffs)} field difference(s) found for {contract.title}.",
+        "task_fields": {
+            "contract_id": contract.id,
+            "title": contract.title,
+            "initiator_user_id": contract.initiator_user_id,
+            "assignee_user_id": contract.assignee_user_id,
+            "diff_status": item.diff_status,
+            "field_diffs": diffs,
+            "related_resources": _related_resources(contract),
+            "evidence": contract.evidence,
+        },
+        "actions": actions,
+        "buttons": actions,
+        "action_key": ACTION_RECONCILIATION_IGNORE_DIFF,
+        "contract_id": contract.id,
+        "recipient_user_id": recipient_user_id,
+        "source_event_id": contract.source_event_id,
+        "reconciliation_item_id": item.id,
+        "related_resources": _related_resources(contract),
+    }
+
+
+def build_reconciliation_summary_card(run: ReconciliationRun) -> dict:
+    items = run.items or []
+    counts: dict[str, int] = {}
+    for item in items:
+        counts[item.diff_status] = counts.get(item.diff_status, 0) + 1
+    need_review = sum(1 for item in items if item.diff_status == "has_diff")
+    return {
+        "card_type": "reconciliation_summary",
+        "title": "Daily reconciliation summary",
+        "summary": run.summary or "Reconciliation run completed.",
+        "task_fields": {
+            "run_id": run.id,
+            "scope": run.scope,
+            "run_type": run.run_type,
+            "status": run.status,
+            "task_count": len(items),
+            "consistent_count": counts.get("consistent", 0),
+            "has_diff_count": counts.get("has_diff", 0),
+            "permission_denied_count": counts.get("permission_denied", 0),
+            "missing_projection_count": counts.get("missing_initiator_projection", 0)
+            + counts.get("missing_assignee_projection", 0),
+            "need_review_count": need_review,
+        },
+        "actions": [],
+        "buttons": [],
+        "action_key": "reconciliation_summary",
+        "contract_id": run.contract_id,
+        "recipient_user_id": run.requester_user_id,
+        "source_event_id": None,
+        "reconciliation_run_id": run.id,
+    }
+
+
 def build_change_proposal_card(
     contract: TaskContract,
     proposal: ChangeProposal,
@@ -342,6 +444,29 @@ def _action(
             "recipient_user_id": recipient_user_id,
             "source_event_id": contract.source_event_id,
             **extra,
+        },
+    }
+
+
+def _reconciliation_action(
+    text: str,
+    action_key: str,
+    item: ReconciliationItem,
+    contract: TaskContract,
+    recipient_user_id: str,
+) -> dict:
+    return {
+        "text": text,
+        "action_key": action_key,
+        "contract_id": contract.id,
+        "recipient_user_id": recipient_user_id,
+        "source_event_id": contract.source_event_id,
+        "payload": {
+            "action_key": action_key,
+            "contract_id": contract.id,
+            "recipient_user_id": recipient_user_id,
+            "source_event_id": contract.source_event_id,
+            "reconciliation_item_id": item.id,
         },
     }
 

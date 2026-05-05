@@ -56,12 +56,34 @@ class DebugBitableDryRunCreateIn(BaseModel):
     owner_user_id: str
 
 
+class DebugBitableCreateRealIn(BaseModel):
+    contract_id: int
+    owner_user_id: str
+    role: str
+
+
+class DebugBitableGetRecordIn(BaseModel):
+    owner_user_id: str
+    external_record_id: str
+
+
+class DebugBitableUpdateRecordIn(BaseModel):
+    owner_user_id: str
+    external_record_id: str
+    patch: dict
+
+
 class DebugMinutesParseLinkIn(BaseModel):
     text: str = Field(min_length=1)
 
 
 class DebugMinutesExtractTasksIn(BaseModel):
     minutes_token_or_url: str = Field(min_length=1)
+
+
+class DebugMinutesReadRealIn(BaseModel):
+    minutes_token_or_url: str = Field(min_length=1)
+    user_id: str = Field(min_length=1)
 
 
 class DebugResourceSearchIn(BaseModel):
@@ -72,6 +94,17 @@ class DebugResourceSearchIn(BaseModel):
 
 class DebugResourceBuildQueriesIn(BaseModel):
     contract_id: int
+
+
+class DebugResourceSearchRealIn(BaseModel):
+    contract_id: int
+    user_id: str
+    write_back: bool = False
+
+
+class DebugAuthScopesIn(BaseModel):
+    user_id: str = Field(min_length=1)
+    required_scopes: list[str] = Field(default_factory=list)
 
 
 class DebugProgressQueryIn(BaseModel):
@@ -86,6 +119,28 @@ class DebugProgressConfirmIn(BaseModel):
     action_key: str = Field(min_length=1)
     progress_text: str | None = None
     new_deadline: date | None = None
+
+
+class DebugReconciliationRunIn(BaseModel):
+    requester_user_id: str
+    scope: Literal["single_task", "all_tasks", "project"]
+    contract_id: int | None = None
+    assignee_user_id: str | None = None
+    project_name: str | None = None
+
+
+class DebugReconciliationApplyActionIn(BaseModel):
+    reconciliation_item_id: int
+    action_key: str = Field(min_length=1)
+    actor_user_id: str
+    field_name: str | None = None
+    resolution_value: object | None = None
+
+
+class DailyReconciliationRunIn(BaseModel):
+    requester_user_id: str
+    assignee_user_id: str | None = None
+    project_name: str | None = None
 
 
 class FeishuEventIn(BaseModel):
@@ -114,5 +169,8 @@ class FeishuCardCallbackIn(BaseModel):
     progress_text: str | None = None
     progress_query_id: int | None = None
     new_deadline: date | None = None
+    reconciliation_item_id: int | None = None
+    field_name: str | None = None
+    resolution_value: object | None = None
     proposal_id: int | None = None
     payload: dict = Field(default_factory=dict)

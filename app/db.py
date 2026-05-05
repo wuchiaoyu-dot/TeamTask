@@ -73,6 +73,10 @@ def _ensure_sqlite_columns() -> None:
                 connection.exec_driver_sql(
                     "ALTER TABLE personal_todo_projections ADD COLUMN last_synced_at DATETIME"
                 )
+            if "snapshot_json" not in todo_columns:
+                connection.exec_driver_sql(
+                    "ALTER TABLE personal_todo_projections ADD COLUMN snapshot_json JSON"
+                )
         if "task_contracts" in table_names:
             task_columns = {column["name"] for column in inspector.get_columns("task_contracts")}
             if "parent_task_title" not in task_columns:

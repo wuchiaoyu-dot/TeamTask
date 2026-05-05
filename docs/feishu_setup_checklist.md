@@ -1,0 +1,25 @@
+# Feishu Setup Checklist
+
+- [ ] Create a Feishu app.
+- [ ] Add bot capability.
+- [ ] Configure event subscription URL: `{PUBLIC_BASE_URL}/feishu/events`.
+- [ ] Configure card callback URL: `{PUBLIC_BASE_URL}/feishu/card-callback`.
+- [ ] Configure `FEISHU_VERIFICATION_TOKEN`.
+- [ ] Configure `FEISHU_CARD_VERIFICATION_TOKEN`.
+- [ ] Keep event encryption off for first dry-run, then configure encrypt keys before broader trial.
+- [ ] Add required scopes for minutes, docs, drive, and base search.
+- [ ] Create a Feishu Bitable table for Todo Projection.
+- [ ] Add fields from `demo/sample_bitable_schema.md`.
+- [ ] Fill `FEISHU_BITABLE_APP_TOKEN`.
+- [ ] Fill `FEISHU_BITABLE_TABLE_ID`.
+- [ ] Configure `ALLOWED_USER_IDS`.
+- [ ] Configure `ALLOWED_CHAT_IDS`.
+- [ ] Start with `ENV_PROFILE=staging_dry_run`.
+- [ ] Test `GET /health`.
+- [ ] Test `GET /readiness`.
+- [ ] Test a group `@Bot` message.
+- [ ] Test an initiator confirmation card click.
+- [ ] Test an assignee confirmation card click.
+- [ ] Test `/debug/resources/search-real` in dry-run.
+- [ ] Test `/debug/bitable/create-real` with `LARK_DRY_RUN=true`.
+- [ ] Switch to `production_trial` only after the dry-run payloads match the expected fields.

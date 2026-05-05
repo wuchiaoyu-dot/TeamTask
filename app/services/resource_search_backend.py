@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import json
 import logging
+import os
+import re
+import subprocess
 from dataclasses import dataclass, field
 from typing import Any
 
 from app.clients.feishu_client import FeishuClient
 from app.config import Settings, get_settings
+from app.core.external_read_guard import should_allow_external_read
 from app.models import SourceEvent, TaskContract
 from app.services.resource_ranker import (
     build_resource_queries,
@@ -125,13 +130,14 @@ class LarkCliResourceSearchBackend(ResourceSearchBackend):
         source_event: SourceEvent,
     ) -> ResourceSearchResult:
         logger.info(
-            "LarkCliResourceSearchBackend search user_id=%s contract_id=%s dry_run=%s sources=%s",
+            "LarkCliResourceSearchBackend search user_id=%s contract_id=%s dry_run=%s real_read=%s sources=%s",
             user_id,
             task_contract.id,
             self.settings.resource_search_dry_run or self.settings.lark_dry_run,
+            should_allow_external_read(self.settings),
             self.settings.resource_search_sources,
         )
-        if self.settings.resource_search_dry_run or self.settings.lark_dry_run:
+        if self.settings.resource_search_dry_run or not should_allow_external_read(self.settings):
             return MockResourceSearchBackend(self.settings, backend_name="lark_cli", dry_run=True).search_resources(
                 user_id,
                 task_contract,
@@ -141,17 +147,8 @@ class LarkCliResourceSearchBackend(ResourceSearchBackend):
         raw_results: list[dict[str, Any]] = []
         queries = build_resource_queries(task_contract, source_event, self.settings)
         for query in queries:
-            for result in self.feishu_client.search_docs(user_id, query):
-                raw_results.append(
-                    {
-                        "title": result.get("title") or result.get("name"),
-                        "url": result.get("url") or result.get("link"),
-                        "source_type": result.get("source_type") or "semantic_match",
-                        "confidence": result.get("confidence") or 0.6,
-                        "reason": result.get("reason") or "Returned by lark-cli document search.",
-                        "matched_keywords": [query],
-                    }
-                )
+            raw_results.extend(self._search_query(user_id, query))
+        raw_results = _dedupe_by_url(raw_results)
         high, low = _rank_results(raw_results, task_contract, source_event, self.settings)
         return ResourceSearchResult(
             high_confidence=high[: self.settings.resource_search_top_k],
@@ -162,6 +159,39 @@ class LarkCliResourceSearchBackend(ResourceSearchBackend):
             dry_run=False,
         )
 
+    def _search_query(self, user_id: str, query: str) -> list[dict[str, Any]]:
+        raw_results: list[dict[str, Any]] = []
+        for source in self.settings.resource_search_sources:
+            command = [
+                self.settings.lark_cli_path,
+                "search",
+                "+query",
+                "--source",
+                source,
+                "--query",
+                query,
+                "--limit",
+                str(self.settings.feishu_doc_search_top_k),
+                "--as",
+                "user" if self.settings.feishu_read_as_user else "bot",
+            ]
+            logger.info("lark-cli resource search command=%s", _redact_command(command))
+            completed = subprocess.run(
+                command,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=self.settings.feishu_read_timeout_seconds,
+            )
+            if completed.returncode != 0:
+                raise RuntimeError(
+                    f"lark-cli resource search failed: {completed.returncode} {_redact_text(completed.stderr)}"
+                )
+            for item in parse_lark_cli_search_output(completed.stdout):
+                normalized = normalize_resource_result({**item, "matched_keywords": [query], "source": source})
+                raw_results.append(normalized)
+        return raw_results
+
 
 def create_resource_search_backend(
     feishu_client: FeishuClient,
@@ -171,6 +201,37 @@ def create_resource_search_backend(
     if settings.feishu_mock or settings.resource_search_backend != "lark_cli":
         return MockResourceSearchBackend(settings)
     return LarkCliResourceSearchBackend(feishu_client, settings)
+
+
+def parse_lark_cli_search_output(raw_output: str | dict[str, Any]) -> list[dict[str, Any]]:
+    if isinstance(raw_output, dict):
+        payload = raw_output
+    else:
+        try:
+            payload = json.loads(raw_output)
+        except json.JSONDecodeError:
+            return []
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    items = data.get("items") or data.get("results") or data.get("docs") or []
+    if isinstance(items, dict):
+        items = [items]
+    return [item for item in items if isinstance(item, dict)]
+
+
+def normalize_resource_result(raw: dict[str, Any]) -> dict[str, Any]:
+    source = raw.get("source") or raw.get("source_type") or raw.get("type") or "semantic_match"
+    title = raw.get("title") or raw.get("name") or raw.get("document_title") or "Untitled"
+    url = raw.get("url") or raw.get("link") or raw.get("web_url") or raw.get("source_url")
+    return {
+        "title": title,
+        "url": url,
+        "source_type": _source_type(source),
+        "confidence": float(raw.get("confidence") or raw.get("score") or 0.6),
+        "reason": raw.get("reason") or f"Returned by lark-cli {source} search.",
+        "matched_keywords": raw.get("matched_keywords") or [],
+        "owner": raw.get("owner") or raw.get("creator"),
+        "updated_at": raw.get("updated_at") or raw.get("last_edited_time"),
+    }
 
 
 def _rank_results(
@@ -193,3 +254,42 @@ def _rank_results(
     high.sort(key=lambda item: item["confidence"], reverse=True)
     low.sort(key=lambda item: item["confidence"], reverse=True)
     return high, low
+
+
+def _dedupe_by_url(resources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    deduped: list[dict[str, Any]] = []
+    for resource in resources:
+        url = str(resource.get("url") or "")
+        key = url or f"{resource.get('title')}:{resource.get('source_type')}"
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(resource)
+    return deduped
+
+
+def _source_type(source: str) -> str:
+    lowered = str(source).lower()
+    if "minute" in lowered:
+        return "historical_minutes"
+    if "base" in lowered or "bitable" in lowered:
+        return "base_match"
+    if "doc" in lowered:
+        return "semantic_match"
+    return lowered or "semantic_match"
+
+
+def _redact_command(command: list[str]) -> list[str]:
+    return [_redact_text(item) for item in command]
+
+
+def _redact_text(text: str) -> str:
+    redacted = text
+    for name in ("FEISHU_APP_SECRET", "FEISHU_ACCESS_TOKEN", "LARK_ACCESS_TOKEN", "FEISHU_BITABLE_APP_TOKEN"):
+        value = os.getenv(name)
+        if value:
+            redacted = redacted.replace(value, "<redacted>")
+    redacted = re.sub(r"(token|secret|authorization)[=:/\s]+[^\s/&]+", r"\1=<redacted>", redacted, flags=re.IGNORECASE)
+    redacted = re.sub(r"/(docx|wiki|minutes|base)/[A-Za-z0-9._-]+", r"/\1/<redacted>", redacted)
+    return redacted

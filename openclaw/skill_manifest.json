@@ -1,0 +1,85 @@
+{
+  "name": "teamtask-agent",
+  "version": "0.12.0",
+  "description": "TeamTask Agent wraps Feishu meeting minutes, group task assignment, progress queries, resource search, and Todo reconciliation behind a permission-aware FastAPI backend.",
+  "entrypoint": {
+    "type": "http",
+    "base_url_env": "TEAMTASK_BASE_URL",
+    "health_path": "/health"
+  },
+  "safety": {
+    "default_profile": "local_mock",
+    "requires_user_allowlist_for_real_use": true,
+    "does_not_use_super_permissions": true
+  },
+  "capabilities": [
+    {
+      "name": "parse_meeting_minutes_tasks",
+      "description": "Parse a Feishu Minutes link or pasted meeting notes into task candidates and initiator confirmation cards.",
+      "input": {
+        "minutes_token_or_url": "string",
+        "meeting_text": "string optional"
+      },
+      "output": {
+        "task_candidates": "array",
+        "initiator_cards": "array"
+      },
+      "api_paths": ["/feishu/events", "/debug/minutes/extract-tasks"]
+    },
+    {
+      "name": "assign_task_from_group_message",
+      "description": "Convert group chat assignment context into a task contract and initiator confirmation card.",
+      "input": {
+        "chat_id": "string",
+        "sender_user_id": "string",
+        "text": "string"
+      },
+      "output": {
+        "contract_id": "integer",
+        "initiator_card": "object"
+      },
+      "api_paths": ["/feishu/events"]
+    },
+    {
+      "name": "query_task_progress",
+      "description": "Match a group progress question to active task contracts and send an assignee progress confirmation card.",
+      "input": {
+        "requester_user_id": "string",
+        "assignee_user_id": "string optional",
+        "query_text": "string"
+      },
+      "output": {
+        "progress_query_id": "integer",
+        "progress_confirm_card": "object"
+      },
+      "api_paths": ["/feishu/events", "/debug/progress/query"]
+    },
+    {
+      "name": "run_task_reconciliation",
+      "description": "Compare initiator and assignee Todo Projection snapshots and generate field-diff review cards.",
+      "input": {
+        "contract_id": "integer optional",
+        "project_name": "string optional",
+        "assignee_user_id": "string optional"
+      },
+      "output": {
+        "run_id": "integer",
+        "field_diff_cards": "array"
+      },
+      "api_paths": ["/debug/reconciliation/run", "/reconciliation/daily-run"]
+    },
+    {
+      "name": "search_related_resources",
+      "description": "Search related Feishu docs, minutes, and Base records, ranked into high and low confidence groups.",
+      "input": {
+        "contract_id": "integer",
+        "user_id": "string"
+      },
+      "output": {
+        "high_confidence": "array",
+        "low_confidence": "array"
+      },
+      "api_paths": ["/debug/resources/search", "/debug/resources/search-real"]
+    }
+  ]
+}

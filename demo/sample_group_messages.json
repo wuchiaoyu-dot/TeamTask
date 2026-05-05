@@ -1,0 +1,24 @@
+[
+  {
+    "event_id": "demo-group-assign-001",
+    "event_type": "group_message",
+    "chat_id": "oc_demo_chat",
+    "text": "Please assign u_assignee to finish the competitive analysis brief by 2026-06-01. Refer to LaunchPlan document.",
+    "sender_user_id": "u_initiator",
+    "participant_user_ids": ["u_initiator", "u_assignee"],
+    "initiator_user_id": "u_initiator",
+    "assignee_user_id": "u_assignee",
+    "project_name": "TeamTask Demo"
+  },
+  {
+    "event_id": "demo-progress-query-001",
+    "event_type": "group_message",
+    "chat_id": "oc_demo_chat",
+    "text": "@TeamTask is u_assignee done with the competitive analysis?",
+    "sender_user_id": "u_initiator",
+    "participant_user_ids": ["u_initiator", "u_assignee"],
+    "initiator_user_id": "u_initiator",
+    "assignee_user_id": "u_assignee",
+    "project_name": "TeamTask Demo"
+  }
+]

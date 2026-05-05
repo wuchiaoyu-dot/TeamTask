@@ -668,6 +668,340 @@ Current safety behavior:
 - `LARK_DRY_RUN=true` prevents real external Todo writes.
 - `/progress/query` still enforces the earlier progress reconciliation grant checks.
 
+## Phase 9: Reconciliation and Field Diff Review
+
+Phase 9 adds the OpenClaw-style daily progress alignment loop. TeamTask still does not hold superuser access. It reconciles the initiator and assignee personal Todo Projections only when both sides have granted reconciliation permission.
+
+Why no super permission:
+
+- Each personal Todo view belongs to a user.
+- Having `external_record_id` is not enough to read another user's Todo.
+- Reconciliation requires active `user_auth_grants` from initiator to assignee and assignee to initiator.
+- In `FEISHU_MOCK=true`, snapshots are local mock projections; in real mode, external reads must still pass the same permission gate.
+
+Field ownership:
+
+- Initiator-owned: `task_title`, `task_description`, `deadline`, `workload_level`, `project_name`
+- Assignee-owned: `progress_text`, `completion_status`, `progress_updated_at`, `blocker_reason`
+- Both-owned: `related_resources_json`, `mentioned_resources`, `evidence`
+- System-owned: ids, provider metadata, timestamps, and other internal bookkeeping
+
+Resolution rules:
+
+- `deadline`, `title`, and `description` differences require initiator review.
+- `progress_text` and `completion_status` are assignee-led and can sync to the initiator projection after assignee confirmation.
+- Resource differences are merged with source markers instead of overwritten.
+- Evidence is never auto-overwritten; it requires manual review.
+- System fields cannot be changed through review cards.
+
+Create both reconciliation grants for local testing:
+
+```powershell
+curl -X POST http://127.0.0.1:8000/dev/auth-grants `
+  -H "Content-Type: application/json" `
+  -d "{\"user_id\":\"u_initiator\",\"scope\":\"progress_reconcile\",\"subject_type\":\"user\",\"subject_id\":\"u_assignee\"}"
+
+curl -X POST http://127.0.0.1:8000/dev/auth-grants `
+  -H "Content-Type: application/json" `
+  -d "{\"user_id\":\"u_assignee\",\"scope\":\"progress_reconcile\",\"subject_type\":\"user\",\"subject_id\":\"u_initiator\"}"
+```
+
+Run a single-task reconciliation:
+
+```powershell
+curl -X POST http://127.0.0.1:8000/debug/reconciliation/run `
+  -H "Content-Type: application/json" `
+  -d "{\"requester_user_id\":\"u_initiator\",\"scope\":\"single_task\",\"contract_id\":1}"
+```
+
+Inspect a reconciliation run:
+
+```powershell
+curl http://127.0.0.1:8000/debug/reconciliation/runs/1
+```
+
+Apply a review action:
+
+```powershell
+curl -X POST http://127.0.0.1:8000/debug/reconciliation/apply-action `
+  -H "Content-Type: application/json" `
+  -d "{\"reconciliation_item_id\":1,\"action_key\":\"reconciliation_sync_progress\",\"actor_user_id\":\"u_assignee\",\"field_name\":\"progress_text\"}"
+```
+
+Simulate a daily reconciliation run:
+
+```powershell
+curl -X POST http://127.0.0.1:8000/reconciliation/daily-run `
+  -H "Content-Type: application/json" `
+  -d "{\"requester_user_id\":\"u_initiator\",\"assignee_user_id\":\"u_assignee\"}"
+```
+
+Useful response fields:
+
+- `field_diffs_json`: per-field initiator value, assignee value, owner, policy, and suggested action
+- `generated_card_json`: review card payload for the diff item
+- `summary_card`: aggregate run summary with counts for consistent, diff, permission denied, and missing projections
+
+Current V1 behavior:
+
+- No scheduler is included yet; `/reconciliation/daily-run` is a manual trigger.
+- Future scheduling can use cron, Feishu scheduled jobs, or an OpenClaw daily trigger.
+- `LARK_DRY_RUN=true` keeps external Todo writes dry-run.
+- `FEISHU_MOCK=true` never calls real Feishu/Lark.
+
+## Phase 10: Real Bitable Integration
+
+Phase 10 extends the Todo Projection backend so it can create, update, and read Feishu Bitable records through a `BitableClient` boundary. Safe defaults still remain mock/dry-run.
+
+Recommended Bitable fields:
+
+- Owner/user field: configured by `FEISHU_TODO_OWNER_FIELD`
+- `contract_id`
+- Title: configured by `FEISHU_TODO_TITLE_FIELD`
+- Description: configured by `FEISHU_TODO_DESCRIPTION_FIELD`
+- Initiator and assignee fields
+- Status/completion field
+- Deadline field
+- Source, evidence, resources, and role fields
+- Optional text field: `progress_text`
+
+Minimum configuration:
+
+```dotenv
+FEISHU_MOCK=true
+TODO_BACKEND=mock
+LARK_DRY_RUN=true
+FEISHU_BITABLE_APP_TOKEN=
+FEISHU_BITABLE_TABLE_ID=
+```
+
+Dry-run Bitable preview:
+
+```powershell
+curl -X POST http://127.0.0.1:8000/debug/bitable/create-real `
+  -H "Content-Type: application/json" `
+  -d "{\"contract_id\":1,\"owner_user_id\":\"u_initiator\",\"role\":\"initiator\"}"
+```
+
+When `FEISHU_MOCK=true` or `LARK_DRY_RUN=true`, the endpoint returns `external_write_allowed=false`, `would_write=true`, and the exact `fields` payload, but does not write to Feishu.
+
+Read a Bitable record snapshot:
+
+```powershell
+curl -X POST http://127.0.0.1:8000/debug/bitable/get-record `
+  -H "Content-Type: application/json" `
+  -d "{\"owner_user_id\":\"u_initiator\",\"external_record_id\":\"recxxxx\"}"
+```
+
+Update a Bitable record:
+
+```powershell
+curl -X POST http://127.0.0.1:8000/debug/bitable/update-record `
+  -H "Content-Type: application/json" `
+  -d "{\"owner_user_id\":\"u_assignee\",\"external_record_id\":\"recxxxx\",\"patch\":{\"progress_text\":\"Draft is 70% complete\",\"completion_status\":\"in_progress\"}}"
+```
+
+Real write switch:
+
+```dotenv
+FEISHU_MOCK=false
+TODO_BACKEND=bitable
+LARK_DRY_RUN=false
+FEISHU_BITABLE_APP_TOKEN=...
+FEISHU_BITABLE_TABLE_ID=...
+LARK_CLI_PATH=lark-cli
+```
+
+Real-write guardrails:
+
+- External writes are allowed only when `FEISHU_MOCK=false`, `TODO_BACKEND=bitable`, `LARK_DRY_RUN=false`, required Bitable config is present, and the app is not running in the test harness.
+- `validate_bitable_config()` reports missing `FEISHU_BITABLE_APP_TOKEN`, `FEISHU_BITABLE_TABLE_ID`, and missing auth path.
+- `should_allow_external_write()` blocks mock, dry-run, non-Bitable, and test runtime writes.
+- Token-like values, app secrets, app tokens, and authorization strings are redacted from lark-cli logs.
+- `FeishuOpenApiBitableClient` is intentionally left as a clear TODO boundary for future HTTPS OpenAPI implementation.
+
+Using real snapshots in reconciliation:
+
+- `BitableTodoBackend.get_projection_snapshot()` reads a Bitable record through `BitableClient.get_record()`.
+- `map_bitable_record_to_snapshot()` maps Bitable fields back to internal fields such as `title`, `description`, `deadline`, `progress_text`, `completion_status`, and `related_resources_json`.
+- Reconciliation still checks both users' grants before reading and diffing projection snapshots.
+
+## Phase 11: Real Minutes and Docs Search Integration
+
+Phase 11 extends the Minutes and Resource Search backends so local dry-run can exercise the real-read boundary for Feishu Minutes, Docs, Drive, historical minutes, and Base search. The default remains safe:
+
+```dotenv
+FEISHU_MOCK=true
+LARK_DRY_RUN=true
+FEISHU_ENABLE_REAL_READ=false
+MINUTES_BACKEND=mock
+RESOURCE_SEARCH_BACKEND=mock
+```
+
+Real reads are blocked unless all of these are true:
+
+- `FEISHU_MOCK=false`
+- `LARK_DRY_RUN=false`
+- `FEISHU_ENABLE_REAL_READ=true`
+- `LARK_CLI_PATH` or Feishu OpenAPI credentials are configured
+- the current user has the required `user_auth_grants`
+- the app is not running in the test harness
+
+Recommended dry-run configuration:
+
+```dotenv
+FEISHU_MOCK=false
+LARK_DRY_RUN=true
+FEISHU_ENABLE_REAL_READ=false
+MINUTES_BACKEND=lark_cli
+RESOURCE_SEARCH_BACKEND=lark_cli
+MINUTES_DRY_RUN=true
+RESOURCE_SEARCH_DRY_RUN=true
+FEISHU_MINUTES_SCOPE_REQUIRED=minutes:read
+FEISHU_DOCS_SCOPE_REQUIRED=docs:read
+FEISHU_DRIVE_SCOPE_REQUIRED=drive:read
+FEISHU_BASE_SCOPE_REQUIRED=base:read
+```
+
+Grant local debug scopes before testing read endpoints:
+
+```powershell
+curl -X POST http://127.0.0.1:8000/dev/auth-grants `
+  -H "Content-Type: application/json" `
+  -d "{\"user_id\":\"u_initiator\",\"scope\":\"minutes:read\"}"
+
+curl -X POST http://127.0.0.1:8000/dev/auth-grants `
+  -H "Content-Type: application/json" `
+  -d "{\"user_id\":\"u_initiator\",\"scope\":\"docs:read\"}"
+```
+
+Check scopes:
+
+```powershell
+curl -X POST http://127.0.0.1:8000/debug/auth/scopes `
+  -H "Content-Type: application/json" `
+  -d "{\"user_id\":\"u_initiator\",\"required_scopes\":[\"minutes:read\",\"docs:read\",\"drive:read\",\"base:read\"]}"
+```
+
+Dry-run a real Minutes read boundary:
+
+```powershell
+curl -X POST http://127.0.0.1:8000/debug/minutes/read-real `
+  -H "Content-Type: application/json" `
+  -d "{\"minutes_token_or_url\":\"https://example.feishu.cn/minutes/mincnxxxx\",\"user_id\":\"u_initiator\"}"
+```
+
+Dry-run resource search for an existing contract:
+
+```powershell
+curl -X POST http://127.0.0.1:8000/debug/resources/search-real `
+  -H "Content-Type: application/json" `
+  -d "{\"contract_id\":1,\"user_id\":\"u_initiator\",\"write_back\":false}"
+```
+
+Failure and fallback behavior:
+
+- If Minutes reading fails, TeamTask does not create an empty task and returns a readable error asking the user to paste meeting notes manually.
+- If resource search fails, task confirmation continues; `resource_search_status=failed` and `resource_search_error` store the error summary.
+- If scopes are missing, the debug endpoints return `missing_scopes` and do not attempt a real read.
+- Logs redact token-like values, app secrets, authorization headers, minutes tokens, and document tokens.
+
+Real-read replacement path:
+
+- `LarkCliMinutesBackend` now has `parse_lark_cli_minutes_output()` and `normalize_minutes_segments()` as the stable adapter boundary.
+- `LarkCliResourceSearchBackend` now has `parse_lark_cli_search_output()` and `normalize_resource_result()` as the stable adapter boundary.
+- `Feishu OpenAPI` can replace lark-cli behind these boundaries without changing the TeamTask state machine or Todo Projection flow.
+
+## Phase 12: Usable Demo and OpenClaw Packaging
+
+Phase 12 packages the current backend for deployment, OpenClaw entry, Feishu callback dry-run, and competition demos. It does not add a new business workflow; it makes the existing task distribution, progress query, resource search, Todo Projection, and reconciliation flows easier to configure and show.
+
+Current capabilities:
+
+- Feishu event ingestion for group messages and meeting minutes.
+- Initiator and assignee confirmation cards.
+- Task status machine and idempotent card actions.
+- Mock or Bitable-backed Todo Projections.
+- Mock or lark-cli-backed Minutes reading and resource search boundaries.
+- Progress query with assignee confirmation.
+- Reconciliation with field ownership and review cards.
+- OpenClaw wrapper manifest and demo prompts.
+
+Runtime profiles:
+
+| Profile | Purpose | Key defaults |
+| --- | --- | --- |
+| `local_mock` | local development and judge demo | `FEISHU_MOCK=true`, `LARK_DRY_RUN=true`, `FEISHU_ENABLE_REAL_READ=false`, mock backends |
+| `staging_dry_run` | real Feishu callback wiring without writes | `FEISHU_MOCK=false`, `LARK_DRY_RUN=true`, `TODO_BACKEND=bitable` |
+| `production_trial` | allowlisted small trial | `FEISHU_MOCK=false`, `LARK_DRY_RUN=false`, `FEISHU_ENABLE_REAL_READ=true`, `TODO_BACKEND=bitable` |
+
+Example env files:
+
+- `.env.local.example`
+- `.env.staging.example`
+- `.env.production.example`
+
+Health and readiness:
+
+```powershell
+curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/readiness
+curl http://127.0.0.1:8000/debug/system/status
+```
+
+`/debug/system/status` reports configuration booleans and guard status only; it does not return secrets, tokens, app secrets, or app tokens.
+
+Allowlist trial controls:
+
+```dotenv
+ALLOWED_USER_IDS=u_demo_initiator,u_demo_assignee
+ALLOWED_CHAT_IDS=oc_demo_chat
+ENABLE_REAL_WRITE_FOR_ALLOWED_USERS_ONLY=true
+ENABLE_REAL_READ_FOR_ALLOWED_USERS_ONLY=true
+```
+
+In `production_trial`, non-allowlisted users or chats cannot trigger real read/write paths. `staging_dry_run` can receive callbacks and return preview payloads, but keeps external writes disabled.
+
+Run the demo smoke test:
+
+```powershell
+uvicorn app.main:app --reload
+python demo/demo_smoke_test.py --base-url http://127.0.0.1:8000
+```
+
+Demo assets:
+
+- `demo/sample_minutes.txt`
+- `demo/sample_group_messages.json`
+- `demo/sample_users.json`
+- `demo/sample_bitable_schema.md`
+- `demo/demo_script.md`
+- `demo/demo_smoke_test.py`
+
+OpenClaw packaging:
+
+- `openclaw/skill_manifest.json` defines five capabilities: meeting minutes parsing, group assignment, progress query, reconciliation, and related resource search.
+- `openclaw/README.md` explains that OpenClaw is the natural-language entrypoint while FastAPI remains the state and permission execution layer.
+- `openclaw/examples/` contains prompt examples for meeting task distribution, group progress queries, and daily reconciliation.
+
+Deployment notes:
+
+- See `docs/deployment.md` for local run, ngrok/cloudflared callback setup, staging dry-run, production trial, and rollback.
+- See `docs/feishu_setup_checklist.md` for the Feishu app, bot, event, card, scope, Bitable, and allowlist checklist.
+
+Recommended competition demo flow:
+
+1. Show meeting minutes task recognition.
+2. Confirm as initiator.
+3. Accept as assignee.
+4. Show high/low confidence resources.
+5. Ask progress in a group-style message.
+6. Confirm progress as assignee.
+7. Run reconciliation.
+8. Show field-diff review and approval.
+
+This version is ready for mock demos and allowlisted trials. It is still not recommended for full-company rollout until real Feishu scopes, Bitable field mapping, allowlists, and callback security have been verified in `staging_dry_run`.
+
 ## Tests
 
 ```powershell
@@ -685,3 +1019,5 @@ Current coverage verifies:
 - lark-cli actor switching uses `--as user` / `--as bot`.
 - lark-cli command logging redacts token-like values.
 - Resource search separates explicit/high-confidence references from low-confidence semantic matches.
+- Real-read guards block mock, dry-run, disabled, test-runtime, and missing-scope reads.
+- Phase 12 packaging verifies profiles, allowlists, health/readiness, OpenClaw manifest, and demo smoke API flow.
