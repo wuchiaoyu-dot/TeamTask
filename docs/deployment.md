@@ -73,7 +73,7 @@ FEISHU_BITABLE_APP_TOKEN=...
 FEISHU_BITABLE_TABLE_ID=...
 ```
 
-Keep `LARK_DRY_RUN=true` until `/debug/bitable/create-real` returns the fields you expect.
+Keep `BITABLE_DRY_RUN=true` and `TODO_PROJECTION_DRY_RUN=true` until `/debug/bitable/create-real` returns the fields you expect.
 
 ## 6. Staging Dry-Run
 
@@ -100,6 +100,9 @@ Required:
 - `ALLOWED_CHAT_IDS` contains every trial chat
 - `FEISHU_MOCK=false`
 - `LARK_DRY_RUN=false`
+- `LARK_CLI_DRY_RUN=false`
+- `BITABLE_DRY_RUN=false`
+- `TODO_PROJECTION_DRY_RUN=false`
 - `FEISHU_ENABLE_REAL_READ=true`
 - `TODO_BACKEND=bitable`
 
@@ -113,6 +116,9 @@ Immediate safe rollback:
 ENV_PROFILE=local_mock
 FEISHU_MOCK=true
 LARK_DRY_RUN=true
+LARK_CLI_DRY_RUN=true
+BITABLE_DRY_RUN=true
+TODO_PROJECTION_DRY_RUN=true
 FEISHU_ENABLE_REAL_READ=false
 TODO_BACKEND=mock
 ```

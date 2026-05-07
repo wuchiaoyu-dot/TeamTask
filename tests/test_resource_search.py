@@ -6,6 +6,8 @@ from typing import Any
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.cards.builders import build_initiator_confirm_card
+from app.cards.feishu_renderer import render_feishu_card
 from app.clients.feishu_client import MockFeishuClient
 from app.config import Settings
 from app.models import TaskContract
@@ -138,6 +140,101 @@ def test_initiator_confirm_card_contains_related_resources(client: TestClient) -
     assert card["related_resources"]["high_confidence"] or card["related_resources"]["low_confidence"]
 
 
+def test_initiator_confirm_card_renders_user_readable_body_without_debug_fields(client: TestClient) -> None:
+    response = _submit_event_response(
+        client,
+        "evt-resource-readable-initiator-card",
+        "Please assign ou_assignee to finish TeamTask resource review by 2026-06-01.",
+    )
+
+    rendered = render_feishu_card(response["initiator_card"]["card"])
+    visible_text = _visible_rendered_text(rendered)
+
+    assert "📌 任务分发确认" in visible_text
+    assert "我识别到你想分配一个任务，请确认是否发送给执行者。" in visible_text
+    assert "任务内容" in visible_text
+    assert "执行者" in visible_text
+    assert "截止时间" in visible_text
+    assert "参考资源" in visible_text
+    assert "Low-confidence resources" not in visible_text
+    for forbidden in ("ou_", "initiator_user_id", "assignee_user_id", "missing_fields", "confidence"):
+        assert forbidden not in visible_text
+
+
+def test_initiator_confirm_card_summarizes_low_confidence_resources(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+) -> None:
+    contract_id = _submit_event(
+        client,
+        "evt-resource-readable-low-only",
+        "Please assign u_assignee to finish TeamTask resource review by 2026-06-01.",
+    )
+    with session_factory() as db:
+        contract = db.get(TaskContract, contract_id)
+        assert contract is not None
+        contract.related_resources_json = {
+            "high_confidence": [],
+            "low_confidence": [
+                {
+                    "title": "Launch notes",
+                    "url": "https://mock.feishu.local/docs/launch",
+                    "confidence": 0.62,
+                },
+                {
+                    "title": "Second weak clue",
+                    "url": "https://mock.feishu.local/docs/weak",
+                    "confidence": 0.51,
+                },
+            ],
+        }
+        card = build_initiator_confirm_card(contract, "u_initiator")
+
+    visible_text = _visible_rendered_text(render_feishu_card(card))
+
+    assert "未找到高置信参考资料，可在修改任务时补充。" in visible_text
+    assert "可选线索：Launch notes，匹配度 62%" in visible_text
+    assert "Second weak clue" not in visible_text
+    assert "Low-confidence resources" not in visible_text
+
+
+def test_initiator_confirm_card_uses_new_button_values(client: TestClient) -> None:
+    response = _submit_event_response(
+        client,
+        "evt-resource-button-values",
+        "Please assign u_assignee to finish TeamTask resource review by 2026-06-01.",
+    )
+    rendered = render_feishu_card(response["initiator_card"]["card"])
+    buttons = _rendered_buttons(rendered)
+
+    assert [button["text"]["content"] for button in buttons] == ["确认并发送", "修改任务", "开始资源搜索", "取消"]
+    assert [button["type"] for button in buttons] == ["primary", "default", "default", "danger"]
+    assert buttons[0]["value"] == {
+        "action": "confirm_send",
+        "task_id": str(response["contract_id"]),
+        "dry_run": True,
+        "initiator_user_id": "u_initiator",
+        "assignee_user_id": "u_assignee",
+    }
+    assert buttons[1]["value"] == {
+        "action": "edit_task",
+        "task_id": str(response["contract_id"]),
+        "dry_run": True,
+    }
+    assert buttons[2]["value"] == {
+        "action": "start_resource_search",
+        "task_id": str(response["contract_id"]),
+        "dry_run": True,
+        "initiator_user_id": "u_initiator",
+        "assignee_user_id": "u_assignee",
+    }
+    assert buttons[3]["value"] == {
+        "action": "cancel_task",
+        "task_id": str(response["contract_id"]),
+        "dry_run": True,
+    }
+
+
 def test_assignee_confirm_card_inherits_initiator_resources(client: TestClient) -> None:
     url = "https://example.feishu.cn/docx/inherited-resource"
     contract_id = _submit_event(
@@ -151,6 +248,76 @@ def test_assignee_confirm_card_inherits_initiator_resources(client: TestClient) 
     assert response.status_code == 200
     card = response.json()["assignee_card"]["card"]
     assert any(item["url"] == url for item in card["related_resources"]["high_confidence"])
+
+
+def test_assignee_confirm_card_renders_chinese_body_without_debug_fields(
+    client: TestClient,
+    session_factory: sessionmaker[Session],
+) -> None:
+    contract_id = _submit_event(
+        client,
+        "evt-resource-assignee-readable-card",
+        "Please assign u_assignee to finish TeamTask resource review by 2026-06-01.",
+    )
+    with session_factory() as db:
+        contract = db.get(TaskContract, contract_id)
+        assert contract is not None
+        contract.title = "Competitive analysis"
+        contract.description = "Prepare a concise competitor brief."
+        contract.related_resources_json = {
+            "high_confidence": [
+                {
+                    "title": "Launch plan",
+                    "url": "https://example.feishu.cn/docx/launch",
+                    "confidence": 0.91,
+                    "reason": "Explicitly mentioned.",
+                }
+            ],
+            "low_confidence": [
+                {
+                    "title": "Related market notes",
+                    "url": "https://example.feishu.cn/docx/market",
+                    "confidence": 0.62,
+                    "reason": "Semantic match from task title.",
+                }
+            ],
+        }
+        db.commit()
+
+    response = _card_callback(client, "initiator_confirm", contract_id, "u_initiator")
+
+    assert response.status_code == 200
+    rendered = render_feishu_card(response.json()["assignee_card"]["card"])
+    visible_text = _visible_rendered_text(rendered)
+    buttons = _rendered_buttons(rendered)
+
+    assert "📌 待确认任务" in visible_text
+    assert "@发起人 分配给你一个任务，请确认是否接收。" in visible_text
+    assert "**任务**\nCompetitive analysis" in visible_text
+    assert "**说明**\nPrepare a concise competitor brief." in visible_text
+    assert "✅ 明确提到" in visible_text
+    assert "Launch plan" in visible_text
+    assert "🔎 可能相关" in visible_text
+    assert "Related market notes" in visible_text
+    assert "确认后，该任务将进入你的 Todo；如内容有误，可以提出修改。" in visible_text
+    assert [button["text"]["content"] for button in buttons] == ["确认接收", "提出修改", "补充资源", "不是我的任务"]
+    assert [button["value"]["action_key"] for button in buttons] == [
+        "assignee_accept",
+        "assignee_propose_change",
+        "assignee_request_resource_search",
+        "assignee_ignore",
+    ]
+    for forbidden in (
+        "Confirm assigned task",
+        "asks you to confirm this task",
+        "initiator_user_id",
+        "assignee_user_id",
+        "pending_assignee_confirm",
+        "High-confidence resources",
+        "Low-confidence resources",
+        "Semantic match",
+    ):
+        assert forbidden not in visible_text
 
 
 def test_initiator_request_resource_search_updates_contract_resources(
@@ -298,3 +465,24 @@ def _card_callback(client: TestClient, action_key: str, contract_id: int, recipi
             "recipient_user_id": recipient_user_id,
         },
     )
+
+
+def _visible_rendered_text(card: dict[str, Any]) -> str:
+    parts: list[str] = [card["header"]["title"]["content"]]
+    for element in card["elements"]:
+        if text := element.get("text"):
+            parts.append(text.get("content", ""))
+        for field in element.get("fields", []):
+            parts.append(field.get("text", {}).get("content", ""))
+        for note in element.get("elements", []):
+            parts.append(note.get("content", ""))
+        for button in element.get("actions", []):
+            parts.append(button.get("text", {}).get("content", ""))
+    return "\n".join(parts)
+
+
+def _rendered_buttons(card: dict[str, Any]) -> list[dict[str, Any]]:
+    buttons: list[dict[str, Any]] = []
+    for element in card["elements"]:
+        buttons.extend(element.get("actions", []))
+    return buttons

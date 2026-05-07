@@ -5,7 +5,7 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 from app.clients.bitable_client import BitableClient, LegacyFeishuBitableClient, create_bitable_client
-from app.config import Settings, get_settings, validate_bitable_config
+from app.config import Settings, get_settings, is_todo_projection_dry_run_enabled, validate_bitable_config
 from app.core.external_write_guard import should_allow_external_write
 from app.models import TaskContract
 from app.services.todo_field_mapper import (
@@ -98,14 +98,15 @@ class BitableTodoBackend(TodoBackend):
         self.bitable_client = _coerce_bitable_client(bitable_client, self.settings)
 
     def create_personal_todo_projection(self, owner_user_id: str, contract: TaskContract, role: str) -> str:
-        if not self.settings.lark_dry_run:
+        dry_run = is_todo_projection_dry_run_enabled(self.settings)
+        if not dry_run:
             validate_bitable_config(self.settings)
         fields = map_contract_to_bitable_fields(owner_user_id, contract, role, self.settings)
         logger.info(
             "BitableTodoBackend create owner_user_id=%s contract_id=%s dry_run=%s fields=%s",
             owner_user_id,
             contract.id,
-            self.settings.lark_dry_run,
+            dry_run,
             fields,
         )
         if not should_allow_external_write(self.settings):
@@ -118,14 +119,15 @@ class BitableTodoBackend(TodoBackend):
         external_record_id: str,
         patch: dict[str, Any],
     ) -> None:
-        if not self.settings.lark_dry_run:
+        dry_run = is_todo_projection_dry_run_enabled(self.settings)
+        if not dry_run:
             validate_bitable_config(self.settings)
         fields = map_patch_to_bitable_fields(patch, self.settings)
         logger.info(
             "BitableTodoBackend update owner_user_id=%s external_record_id=%s dry_run=%s patch=%s",
             owner_user_id,
             external_record_id,
-            self.settings.lark_dry_run,
+            dry_run,
             fields,
         )
         if not should_allow_external_write(self.settings):
@@ -133,7 +135,7 @@ class BitableTodoBackend(TodoBackend):
         self.bitable_client.update_record(self._app_token(), self._table_id(), external_record_id, fields)
 
     def find_existing_projection(self, owner_user_id: str, contract_id: int) -> str | None:
-        if not self.settings.lark_dry_run:
+        if not is_todo_projection_dry_run_enabled(self.settings):
             validate_bitable_config(self.settings)
         if not should_allow_external_write(self.settings):
             return None
@@ -152,7 +154,7 @@ class BitableTodoBackend(TodoBackend):
         return None
 
     def get_personal_todo(self, owner_user_id: str, external_record_id: str) -> dict[str, Any]:
-        if self.settings.lark_dry_run:
+        if is_todo_projection_dry_run_enabled(self.settings):
             return {
                 "dry_run": True,
                 "owner_user_id": owner_user_id,
@@ -162,13 +164,14 @@ class BitableTodoBackend(TodoBackend):
         return self.bitable_client.get_record(self._app_token(), self._table_id(), external_record_id)
 
     def get_projection_snapshot(self, owner_user_id: str, external_record_id: str) -> dict[str, Any]:
+        dry_run = is_todo_projection_dry_run_enabled(self.settings)
         logger.info(
             "BitableTodoBackend get_projection_snapshot owner_user_id=%s external_record_id=%s dry_run=%s",
             owner_user_id,
             external_record_id,
-            self.settings.lark_dry_run,
+            dry_run,
         )
-        if self.settings.lark_dry_run:
+        if dry_run:
             return {
                 "dry_run": True,
                 "owner_user_id": owner_user_id,

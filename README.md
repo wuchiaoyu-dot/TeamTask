@@ -14,6 +14,7 @@ The system intentionally avoids super-user behavior. Cross-person work is mediat
 - pytest
 - python-dotenv
 - Feishu/Lark client adapter with mock and lark-cli modes
+- Optional OpenAI-compatible LLM task extraction for demos
 
 ## Project Layout
 
@@ -80,6 +81,22 @@ client.as_bot()
 ```
 
 The CLI command uses `--as user` or `--as bot` under the hood.
+
+## Optional LLM Task Extraction
+
+The default task extractor is deterministic rule code, so local tests and mock demos do not require a model API. For a semantic demo, enable an OpenAI-compatible chat-completions endpoint:
+
+```dotenv
+TASK_EXTRACTOR_BACKEND=llm
+TASK_EXTRACTOR_LLM_FALLBACK=true
+LLM_TASK_API_BASE=https://api.openai.com/v1
+LLM_TASK_API_KEY=your_key
+LLM_TASK_MODEL=your_model
+LLM_TASK_PROMPT_PATH=prompts/extract_tasks.md
+LLM_TASK_RESPONSE_FORMAT=json_object
+```
+
+Use `TASK_EXTRACTOR_BACKEND=auto` when you want the app to call the LLM only if the key and model are configured. For Ark models that reject `response_format`, set `LLM_TASK_RESPONSE_FORMAT=none`. The LLM only returns `TaskCandidate` JSON; state transitions, card actions, Todo writes, and permission checks remain inside the backend.
 
 ## Install lark-cli
 

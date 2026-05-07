@@ -12,26 +12,47 @@ ENV_PROFILE_DEFAULTS: dict[str, dict[str, str]] = {
     "local_mock": {
         "FEISHU_MOCK": "true",
         "LARK_DRY_RUN": "true",
+        "LARK_CLI_DRY_RUN": "true",
+        "FEISHU_SEND_DRY_RUN": "true",
+        "BITABLE_DRY_RUN": "true",
+        "TODO_PROJECTION_DRY_RUN": "true",
         "FEISHU_ENABLE_REAL_READ": "false",
+        "RESOURCE_SEARCH_REAL_READ": "false",
         "TODO_BACKEND": "mock",
         "MINUTES_BACKEND": "mock",
         "RESOURCE_SEARCH_BACKEND": "mock",
+        "RESOURCE_SEARCH_DRY_RUN": "true",
+        "TASK_EXTRACTOR_BACKEND": "rule",
     },
     "staging_dry_run": {
         "FEISHU_MOCK": "false",
         "LARK_DRY_RUN": "true",
+        "LARK_CLI_DRY_RUN": "false",
+        "FEISHU_SEND_DRY_RUN": "false",
+        "BITABLE_DRY_RUN": "true",
+        "TODO_PROJECTION_DRY_RUN": "true",
         "FEISHU_ENABLE_REAL_READ": "false",
+        "RESOURCE_SEARCH_REAL_READ": "false",
         "TODO_BACKEND": "bitable",
         "MINUTES_BACKEND": "lark_cli",
         "RESOURCE_SEARCH_BACKEND": "lark_cli",
+        "RESOURCE_SEARCH_DRY_RUN": "true",
+        "TASK_EXTRACTOR_BACKEND": "rule",
     },
     "production_trial": {
         "FEISHU_MOCK": "false",
         "LARK_DRY_RUN": "false",
+        "LARK_CLI_DRY_RUN": "false",
+        "FEISHU_SEND_DRY_RUN": "false",
+        "BITABLE_DRY_RUN": "false",
+        "TODO_PROJECTION_DRY_RUN": "false",
         "FEISHU_ENABLE_REAL_READ": "true",
+        "RESOURCE_SEARCH_REAL_READ": "true",
         "TODO_BACKEND": "bitable",
         "MINUTES_BACKEND": "lark_cli",
         "RESOURCE_SEARCH_BACKEND": "lark_cli",
+        "RESOURCE_SEARCH_DRY_RUN": "false",
+        "TASK_EXTRACTOR_BACKEND": "rule",
     },
 }
 
@@ -41,12 +62,26 @@ class Settings:
     env_profile: str = "local_mock"
     database_url: str = "sqlite:///./teamtask_agent.db"
     teamtask_confidence_threshold: float = 0.6
+    task_extractor_backend: str = "rule"
+    task_extractor_llm_fallback: bool = True
+    llm_task_api_base: str = "https://api.openai.com/v1"
+    llm_task_api_key: str | None = None
+    llm_task_model: str | None = None
+    llm_task_prompt_path: str = "prompts/extract_tasks.md"
+    llm_task_response_format: str = "json_object"
+    llm_task_timeout_seconds: int = 30
+    llm_task_max_input_chars: int = 20000
+    llm_task_temperature: float = 0.0
     feishu_mock: bool = True
     feishu_app_id: str | None = None
     feishu_app_secret: str | None = None
     lark_dry_run: bool = True
+    lark_cli_dry_run: bool = True
+    feishu_send_dry_run: bool = True
     lark_cli_path: str = "lark-cli"
     todo_backend: str = "mock"
+    bitable_dry_run: bool | None = None
+    todo_projection_dry_run: bool | None = None
     feishu_bitable_app_token: str | None = None
     feishu_bitable_table_id: str | None = None
     feishu_bitable_view_id: str | None = None
@@ -81,6 +116,7 @@ class Settings:
     enable_real_read_for_allowed_users_only: bool = True
     resource_search_backend: str = "mock"
     resource_search_dry_run: bool = True
+    resource_search_real_read: bool = False
     resource_search_top_k: int = 5
     resource_search_high_confidence_threshold: float = 0.8
     resource_search_low_confidence_threshold: float = 0.5
@@ -92,16 +128,35 @@ class Settings:
 
 def get_settings() -> Settings:
     env_profile = os.getenv("ENV_PROFILE", "local_mock").strip().lower()
+    lark_cli_dry_run = _send_dry_run(env_profile)
+    resource_search_real_read = _resource_search_real_read(env_profile)
     return Settings(
         env_profile=env_profile,
         database_url=os.getenv("DATABASE_URL", "sqlite:///./teamtask_agent.db"),
         teamtask_confidence_threshold=_env_float("TEAMTASK_CONFIDENCE_THRESHOLD", 0.6),
+        task_extractor_backend=os.getenv(
+            "TASK_EXTRACTOR_BACKEND",
+            _profile_value(env_profile, "TASK_EXTRACTOR_BACKEND", "rule"),
+        ).strip().lower(),
+        task_extractor_llm_fallback=_env_bool("TASK_EXTRACTOR_LLM_FALLBACK", True),
+        llm_task_api_base=os.getenv("LLM_TASK_API_BASE", "https://api.openai.com/v1").rstrip("/"),
+        llm_task_api_key=os.getenv("LLM_TASK_API_KEY") or None,
+        llm_task_model=os.getenv("LLM_TASK_MODEL") or None,
+        llm_task_prompt_path=os.getenv("LLM_TASK_PROMPT_PATH", "prompts/extract_tasks.md"),
+        llm_task_response_format=os.getenv("LLM_TASK_RESPONSE_FORMAT", "json_object").strip().lower(),
+        llm_task_timeout_seconds=_env_int("LLM_TASK_TIMEOUT_SECONDS", 30),
+        llm_task_max_input_chars=_env_int("LLM_TASK_MAX_INPUT_CHARS", 20000),
+        llm_task_temperature=_env_float("LLM_TASK_TEMPERATURE", 0.0),
         feishu_mock=_env_bool("FEISHU_MOCK", _profile_bool(env_profile, "FEISHU_MOCK", True)),
         feishu_app_id=os.getenv("FEISHU_APP_ID") or None,
         feishu_app_secret=os.getenv("FEISHU_APP_SECRET") or None,
         lark_dry_run=_env_bool("LARK_DRY_RUN", _profile_bool(env_profile, "LARK_DRY_RUN", True)),
+        lark_cli_dry_run=lark_cli_dry_run,
+        feishu_send_dry_run=lark_cli_dry_run,
         lark_cli_path=os.getenv("LARK_CLI_PATH", "lark-cli"),
         todo_backend=os.getenv("TODO_BACKEND", _profile_value(env_profile, "TODO_BACKEND", "mock")).strip().lower(),
+        bitable_dry_run=_bitable_dry_run(env_profile),
+        todo_projection_dry_run=_todo_projection_dry_run(env_profile),
         feishu_bitable_app_token=os.getenv("FEISHU_BITABLE_APP_TOKEN") or None,
         feishu_bitable_table_id=os.getenv("FEISHU_BITABLE_TABLE_ID") or None,
         feishu_bitable_view_id=os.getenv("FEISHU_BITABLE_VIEW_ID") or None,
@@ -144,7 +199,8 @@ def get_settings() -> Settings:
             "RESOURCE_SEARCH_BACKEND",
             _profile_value(env_profile, "RESOURCE_SEARCH_BACKEND", "mock"),
         ).strip().lower(),
-        resource_search_dry_run=_env_bool("RESOURCE_SEARCH_DRY_RUN", True),
+        resource_search_dry_run=_resource_search_dry_run(env_profile, resource_search_real_read),
+        resource_search_real_read=resource_search_real_read,
         resource_search_top_k=_env_int("RESOURCE_SEARCH_TOP_K", 5),
         resource_search_high_confidence_threshold=_env_float("RESOURCE_SEARCH_HIGH_CONFIDENCE_THRESHOLD", 0.8),
         resource_search_low_confidence_threshold=_env_float("RESOURCE_SEARCH_LOW_CONFIDENCE_THRESHOLD", 0.5),
@@ -161,6 +217,8 @@ def validate_env_profile(settings: Settings | None = None) -> None:
         raise ValueError(
             "Unknown ENV_PROFILE. Expected one of: " + ", ".join(sorted(ENV_PROFILE_DEFAULTS.keys()))
         )
+    if settings.task_extractor_backend not in {"rule", "llm", "auto"}:
+        raise ValueError("TASK_EXTRACTOR_BACKEND must be one of: rule, llm, auto")
     if settings.env_profile != "production_trial":
         return
 
@@ -169,6 +227,10 @@ def validate_env_profile(settings: Settings | None = None) -> None:
         problems.append("FEISHU_MOCK must be false")
     if settings.lark_dry_run:
         problems.append("LARK_DRY_RUN must be false")
+    if settings.feishu_send_dry_run:
+        problems.append("LARK_CLI_DRY_RUN or FEISHU_SEND_DRY_RUN must be false")
+    if is_todo_projection_dry_run_enabled(settings):
+        problems.append("BITABLE_DRY_RUN and TODO_PROJECTION_DRY_RUN must be false")
     if not settings.feishu_enable_real_read:
         problems.append("FEISHU_ENABLE_REAL_READ must be true")
     if settings.todo_backend != "bitable":
@@ -224,6 +286,62 @@ def _env_bool(name: str, default: bool) -> bool:
     if raw_value is None:
         return default
     return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _send_dry_run(profile: str) -> bool:
+    if os.getenv("LARK_CLI_DRY_RUN") is not None:
+        return _env_bool("LARK_CLI_DRY_RUN", True)
+    if os.getenv("FEISHU_SEND_DRY_RUN") is not None:
+        return _env_bool("FEISHU_SEND_DRY_RUN", True)
+    if os.getenv("LARK_CARD_DRY_RUN") is not None:
+        return _env_bool("LARK_CARD_DRY_RUN", True)
+    return _profile_bool(profile, "LARK_CLI_DRY_RUN", _profile_bool(profile, "FEISHU_SEND_DRY_RUN", True))
+
+
+def _bitable_dry_run(profile: str) -> bool:
+    if os.getenv("BITABLE_DRY_RUN") is not None:
+        return _env_bool("BITABLE_DRY_RUN", True)
+    if os.getenv("LARK_DRY_RUN") is not None:
+        return _env_bool("LARK_DRY_RUN", True)
+    return _profile_bool(profile, "BITABLE_DRY_RUN", True)
+
+
+def _todo_projection_dry_run(profile: str) -> bool:
+    if os.getenv("TODO_PROJECTION_DRY_RUN") is not None:
+        return _env_bool("TODO_PROJECTION_DRY_RUN", True)
+    if os.getenv("BITABLE_DRY_RUN") is not None:
+        return _env_bool("BITABLE_DRY_RUN", True)
+    if os.getenv("LARK_DRY_RUN") is not None:
+        return _env_bool("LARK_DRY_RUN", True)
+    return _profile_bool(profile, "TODO_PROJECTION_DRY_RUN", True)
+
+
+def _resource_search_real_read(profile: str) -> bool:
+    if os.getenv("RESOURCE_SEARCH_REAL_READ") is not None:
+        return _env_bool("RESOURCE_SEARCH_REAL_READ", False)
+    return _profile_bool(profile, "RESOURCE_SEARCH_REAL_READ", False)
+
+
+def _resource_search_dry_run(profile: str, resource_search_real_read: bool) -> bool:
+    if os.getenv("RESOURCE_SEARCH_DRY_RUN") is not None:
+        return _env_bool("RESOURCE_SEARCH_DRY_RUN", True)
+    if os.getenv("RESOURCE_SEARCH_REAL_READ") is not None:
+        return not resource_search_real_read
+    return _profile_bool(profile, "RESOURCE_SEARCH_DRY_RUN", True)
+
+
+def is_bitable_dry_run_enabled(settings: Settings) -> bool:
+    if settings.bitable_dry_run is None:
+        return settings.lark_dry_run
+    return settings.bitable_dry_run
+
+
+def is_todo_projection_dry_run_enabled(settings: Settings) -> bool:
+    if settings.todo_projection_dry_run is None:
+        todo_dry_run = settings.lark_dry_run
+    else:
+        todo_dry_run = settings.todo_projection_dry_run
+    return todo_dry_run or is_bitable_dry_run_enabled(settings)
 
 
 def _env_float(name: str, default: float) -> float:

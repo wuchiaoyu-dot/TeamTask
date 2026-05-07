@@ -29,7 +29,7 @@
 
 - 确认 `TODO_BACKEND=bitable`。
 - 确认 `FEISHU_BITABLE_APP_TOKEN` 和 `FEISHU_BITABLE_TABLE_ID` 已配置。
-- 先用 `LARK_DRY_RUN=true` 调 `/debug/bitable/create-real` 查看 fields。
+- 先用 `BITABLE_DRY_RUN=true` 和 `TODO_PROJECTION_DRY_RUN=true` 调 `/debug/bitable/create-real` 查看 fields。
 - 确认多维表格字段名和 `.env` 字段映射一致。
 
 ## 6. scope 不足
@@ -46,11 +46,12 @@
 - 非白名单用户会收到 403。
 - 查看 `/debug/system/status` 的 allowlist count，但该接口不会泄露具体用户列表。
 
-## 8. LARK_DRY_RUN 导致没有真实写入
+## 8. dry-run 导致没有真实写入或发卡片
 
 - 这是安全默认行为。
-- `LARK_DRY_RUN=true` 时只打印或返回 would-write / would-read payload。
-- 真实试用前必须显式设置 `LARK_DRY_RUN=false`，并确认白名单、scope 和字段映射。
+- 卡片发送由 `LARK_CLI_DRY_RUN` / `FEISHU_SEND_DRY_RUN` 控制。
+- Bitable/Todo 写入由 `BITABLE_DRY_RUN` / `TODO_PROJECTION_DRY_RUN` 控制。
+- 资源检索由 `RESOURCE_SEARCH_REAL_READ` / `RESOURCE_SEARCH_DRY_RUN` 控制。
 
 ## 9. demo smoke test 失败
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -44,7 +45,7 @@ def adapt_feishu_event(payload: dict[str, Any]) -> SourceEventCreate:
         text=text,
         source_link=source_link,
         raw_payload=payload,
-        participant_user_ids=_extract_participant_user_ids(message, sender),
+        participant_user_ids=_extract_participant_user_ids(message, sender, text),
     )
 
 
@@ -110,18 +111,63 @@ def _extract_first_url(text: str, message: dict[str, Any]) -> str | None:
     return match.group(0).rstrip(").,，。\"'") if match else None
 
 
-def _extract_participant_user_ids(message: dict[str, Any], sender: dict[str, Any]) -> list[str]:
+def _extract_participant_user_ids(message: dict[str, Any], sender: dict[str, Any], text: str) -> list[str]:
     users: list[str] = []
     sender_id = _extract_user_id(sender)
     if sender_id != "unknown_user":
         users.append(sender_id)
 
-    for mention in message.get("mentions") or []:
-        key = mention.get("id") or mention.get("user_id") or {}
-        if isinstance(key, dict):
-            user_id = key.get("user_id") or key.get("open_id") or key.get("union_id")
-        else:
-            user_id = key
+    mentions = message.get("mentions") or []
+    for index, mention in enumerate(mentions):
+        user_id = _extract_mention_user_id(mention)
+        if _should_ignore_mention(user_id, mention, index, mentions, text):
+            continue
         if user_id and user_id not in users:
             users.append(user_id)
     return users
+
+
+def _extract_mention_user_id(mention: dict[str, Any]) -> str | None:
+    key = mention.get("id") or mention.get("user_id") or {}
+    if isinstance(key, dict):
+        return key.get("user_id") or key.get("open_id") or key.get("union_id")
+    return key if key else None
+
+
+def _should_ignore_mention(
+    user_id: str | None,
+    mention: dict[str, Any],
+    index: int,
+    mentions: list[dict[str, Any]],
+    text: str,
+) -> bool:
+    if not user_id:
+        return False
+    if user_id in _ignored_mention_user_ids():
+        return True
+    return _looks_like_leading_bot_trigger(mention, index, mentions, text)
+
+
+def _ignored_mention_user_ids() -> set[str]:
+    return {
+        value
+        for env_name in ("FEISHU_BOT_OPEN_IDS", "FEISHU_BOT_USER_IDS", "FEISHU_IGNORE_MENTION_USER_IDS")
+        for value in _env_csv(env_name)
+    }
+
+
+def _looks_like_leading_bot_trigger(
+    mention: dict[str, Any],
+    index: int,
+    mentions: list[dict[str, Any]],
+    text: str,
+) -> bool:
+    if index != 0 or len(mentions) < 2:
+        return False
+    key = mention.get("key")
+    return isinstance(key, str) and bool(key) and text.lstrip().startswith(key)
+
+
+def _env_csv(name: str) -> tuple[str, ...]:
+    raw_value = os.getenv(name, "")
+    return tuple(value.strip() for value in raw_value.split(",") if value.strip())

@@ -20,6 +20,23 @@ curl http://127.0.0.1:8000/readiness
 
 ## 3. Simulate Meeting Minutes Event
 
+Optional LLM semantic extraction for demos:
+
+```powershell
+$env:TASK_EXTRACTOR_BACKEND="llm"
+$env:LLM_TASK_API_BASE="https://api.openai.com/v1"
+$env:LLM_TASK_API_KEY="your_key"
+$env:LLM_TASK_MODEL="your_model"
+```
+
+For Ark models that reject `response_format`, add:
+
+```powershell
+$env:LLM_TASK_RESPONSE_FORMAT="none"
+```
+
+Use `TASK_EXTRACTOR_BACKEND=auto` if you want the same demo to fall back to rule extraction when the model is not configured.
+
 ```powershell
 curl -X POST http://127.0.0.1:8000/feishu/events `
   -H "Content-Type: application/json" `

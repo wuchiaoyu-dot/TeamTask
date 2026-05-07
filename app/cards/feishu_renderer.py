@@ -14,8 +14,24 @@ def render_feishu_card(internal_card: dict[str, Any]) -> dict[str, Any]:
         }
     ]
 
-    task_fields = internal_card.get("task_fields") or {}
-    if task_fields:
+    display_sections = internal_card.get("display_sections") or []
+    if display_sections:
+        for section in display_sections:
+            label = section.get("label")
+            content = section.get("content")
+            if not label or content in {None, ""}:
+                continue
+            elements.append(
+                {
+                    "tag": "div",
+                    "text": {
+                        "tag": "lark_md",
+                        "content": f"**{label}**\n{content}",
+                    },
+                }
+            )
+    elif internal_card.get("task_fields"):
+        task_fields = internal_card.get("task_fields") or {}
         elements.append(
             {
                 "tag": "div",
@@ -33,8 +49,11 @@ def render_feishu_card(internal_card: dict[str, Any]) -> dict[str, Any]:
             }
         )
 
-    related_resources = internal_card.get("related_resources") or {}
-    resource_text = _resource_markdown(related_resources)
+    if not display_sections:
+        related_resources = internal_card.get("related_resources") or {}
+        resource_text = _resource_markdown(related_resources)
+    else:
+        resource_text = ""
     if resource_text:
         elements.append(
             {
@@ -46,30 +65,18 @@ def render_feishu_card(internal_card: dict[str, Any]) -> dict[str, Any]:
             }
         )
 
-    for action in internal_card.get("actions") or []:
+    footer_note = internal_card.get("footer_note")
+    if footer_note:
         elements.append(
             {
-                "tag": "action",
-                "actions": [
-                    {
-                        "tag": "button",
-                        "text": {"tag": "plain_text", "content": action.get("text") or action.get("action_key")},
-                        "type": "primary",
-                        "value": {
-                            "action_key": action["action_key"],
-                            "contract_id": action["contract_id"],
-                            "recipient_user_id": action["recipient_user_id"],
-                            "source_event_id": action.get("source_event_id"),
-                            **{
-                                key: value
-                                for key, value in (action.get("payload") or {}).items()
-                                if key not in {"action_key", "contract_id", "recipient_user_id", "source_event_id"}
-                            },
-                        },
-                    }
-                ],
+                "tag": "note",
+                "elements": [{"tag": "plain_text", "content": footer_note}],
             }
         )
+
+    buttons = [_button(action) for action in internal_card.get("actions") or []]
+    if buttons:
+        elements.append({"tag": "action", "actions": buttons})
 
     return {
         "config": {"wide_screen_mode": True},
@@ -78,6 +85,29 @@ def render_feishu_card(internal_card: dict[str, Any]) -> dict[str, Any]:
             "template": "blue",
         },
         "elements": elements,
+    }
+
+
+def _button(action: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "tag": "button",
+        "text": {"tag": "plain_text", "content": action.get("text") or action.get("action_key")},
+        "type": action.get("button_type") or "primary",
+        "value": action.get("value") or _legacy_action_value(action),
+    }
+
+
+def _legacy_action_value(action: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "action_key": action["action_key"],
+        "contract_id": action["contract_id"],
+        "recipient_user_id": action["recipient_user_id"],
+        "source_event_id": action.get("source_event_id"),
+        **{
+            key: value
+            for key, value in (action.get("payload") or {}).items()
+            if key not in {"action_key", "contract_id", "recipient_user_id", "source_event_id"}
+        },
     }
 
 

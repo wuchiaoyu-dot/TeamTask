@@ -20,3 +20,7 @@ class TaskCandidate(BaseModel):
     evidence: list[str] = Field(default_factory=list)
     missing_fields: list[str] = Field(default_factory=list)
     confidence: float = Field(ge=0.0, le=1.0)
+
+
+class TaskCandidateExtraction(BaseModel):
+    task_candidates: list[TaskCandidate] = Field(default_factory=list)

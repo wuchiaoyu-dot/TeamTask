@@ -83,6 +83,47 @@ def test_real_feishu_card_payload_converts_to_internal_card_action() -> None:
     assert adapted.source_event_id == 99
 
 
+def test_new_initiator_card_button_values_convert_to_legacy_handlers() -> None:
+    confirm = adapt_feishu_card_action(
+        _new_card_value_payload(
+            {
+                "action": "confirm_send",
+                "task_id": "123",
+                "dry_run": True,
+                "initiator_user_id": "u_initiator",
+                "assignee_user_id": "u_assignee",
+            }
+        )
+    )
+    edit = adapt_feishu_card_action(
+        _new_card_value_payload({"action": "edit_task", "task_id": "123", "dry_run": True})
+    )
+    resource_search = adapt_feishu_card_action(
+        _new_card_value_payload(
+            {
+                "action": "start_resource_search",
+                "task_id": "123",
+                "dry_run": True,
+                "initiator_user_id": "u_initiator",
+                "assignee_user_id": "u_assignee",
+            }
+        )
+    )
+    cancel = adapt_feishu_card_action(
+        _new_card_value_payload({"action": "cancel_task", "task_id": "123", "dry_run": True})
+    )
+
+    assert confirm.action_key == "initiator_confirm"
+    assert confirm.contract_id == 123
+    assert confirm.recipient_user_id == "u_initiator"
+    assert edit.action_key == "initiator_edit_task"
+    assert edit.recipient_user_id == "u_initiator"
+    assert resource_search.action_key == "initiator_request_resource_search"
+    assert resource_search.recipient_user_id == "u_initiator"
+    assert cancel.action_key == "initiator_ignore"
+    assert cancel.recipient_user_id == "u_initiator"
+
+
 def test_illegal_action_key_returns_400(client: TestClient) -> None:
     response = client.post(
         "/feishu/card-callback",
@@ -240,6 +281,29 @@ def _real_card_payload(action_key: str, contract_id: int, recipient_user_id: str
                 "form_value": {
                     "progress_summary": "Dry-run progress",
                 },
+            },
+        },
+    }
+
+
+def _new_card_value_payload(value: dict) -> dict:
+    return {
+        "schema": "2.0",
+        "header": {
+            "event_id": "card-event-1",
+            "event_type": "card.action.trigger",
+        },
+        "event": {
+            "operator": {
+                "user_id": {
+                    "user_id": "u_initiator",
+                    "open_id": "ou_initiator",
+                }
+            },
+            "action": {
+                "tag": "button",
+                "value": value,
+                "form_value": {},
             },
         },
     }

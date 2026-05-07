@@ -15,11 +15,14 @@
 - [ ] Configure `ALLOWED_USER_IDS`.
 - [ ] Configure `ALLOWED_CHAT_IDS`.
 - [ ] Start with `ENV_PROFILE=staging_dry_run`.
+- [ ] Set `LARK_CLI_DRY_RUN=false` and `FEISHU_SEND_DRY_RUN=false` for real confirmation-card delivery.
+- [ ] Keep `BITABLE_DRY_RUN=true` and `TODO_PROJECTION_DRY_RUN=true` until Bitable/Todo writes are approved.
+- [ ] Keep `RESOURCE_SEARCH_REAL_READ=false` and `RESOURCE_SEARCH_DRY_RUN=true` for the first staging pass.
 - [ ] Test `GET /health`.
 - [ ] Test `GET /readiness`.
 - [ ] Test a group `@Bot` message.
 - [ ] Test an initiator confirmation card click.
 - [ ] Test an assignee confirmation card click.
 - [ ] Test `/debug/resources/search-real` in dry-run.
-- [ ] Test `/debug/bitable/create-real` with `LARK_DRY_RUN=true`.
+- [ ] Test `/debug/bitable/create-real` with `BITABLE_DRY_RUN=true` and `TODO_PROJECTION_DRY_RUN=true`.
 - [ ] Switch to `production_trial` only after the dry-run payloads match the expected fields.

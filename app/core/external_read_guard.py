@@ -10,8 +10,6 @@ def should_allow_external_read(settings: Settings | None = None) -> bool:
     settings = settings or get_settings()
     if settings.feishu_mock:
         return False
-    if settings.lark_dry_run:
-        return False
     if not settings.feishu_enable_real_read:
         return False
     if os.getenv("TEAMTASK_SKIP_DB_INIT") == "1":
@@ -28,7 +26,7 @@ def assert_external_read_allowed(settings: Settings | None = None) -> None:
     validate_real_read_config(settings)
     if not should_allow_external_read(settings):
         raise PermissionError(
-            "External Feishu reads are disabled. Require FEISHU_MOCK=false, LARK_DRY_RUN=false, "
+            "External Feishu reads are disabled. Require FEISHU_MOCK=false, "
             "FEISHU_ENABLE_REAL_READ=true, valid read config, and non-test runtime."
         )
 

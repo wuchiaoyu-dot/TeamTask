@@ -25,6 +25,10 @@ def test_local_mock_profile_defaults_to_no_real_read_or_write(monkeypatch) -> No
     assert settings.env_profile == "local_mock"
     assert settings.feishu_mock is True
     assert settings.lark_dry_run is True
+    assert settings.lark_cli_dry_run is True
+    assert settings.feishu_send_dry_run is True
+    assert settings.bitable_dry_run is True
+    assert settings.todo_projection_dry_run is True
     assert should_allow_external_read(settings) is False
     assert should_allow_external_write(settings) is False
 
@@ -36,6 +40,10 @@ def test_staging_dry_run_profile_receives_events_but_does_not_write(
     monkeypatch.setenv("ENV_PROFILE", "staging_dry_run")
     monkeypatch.setenv("FEISHU_MOCK", "false")
     monkeypatch.setenv("LARK_DRY_RUN", "true")
+    monkeypatch.setenv("LARK_CLI_DRY_RUN", "false")
+    monkeypatch.setenv("FEISHU_SEND_DRY_RUN", "false")
+    monkeypatch.setenv("BITABLE_DRY_RUN", "true")
+    monkeypatch.setenv("TODO_PROJECTION_DRY_RUN", "true")
     monkeypatch.setenv("TODO_BACKEND", "bitable")
     monkeypatch.setenv("FEISHU_ENABLE_REAL_READ", "false")
 
@@ -57,6 +65,10 @@ def test_staging_dry_run_profile_receives_events_but_does_not_write(
     assert response.status_code == 200
     assert response.json()["contract_status"] == "pending_initiator_confirm"
     settings = get_settings()
+    assert settings.lark_cli_dry_run is False
+    assert settings.feishu_send_dry_run is False
+    assert settings.bitable_dry_run is True
+    assert settings.todo_projection_dry_run is True
     assert should_allow_external_write(settings) is False
 
 
@@ -126,6 +138,10 @@ def test_health_returns_key_config_state(client: TestClient) -> None:
     assert "env_profile" in body
     assert "feishu_mock" in body
     assert "lark_dry_run" in body
+    assert "lark_cli_dry_run" in body
+    assert "feishu_send_dry_run" in body
+    assert "bitable_dry_run" in body
+    assert "todo_projection_dry_run" in body
     assert "todo_backend" in body
     assert "minutes_backend" in body
     assert "resource_search_backend" in body
@@ -238,7 +254,12 @@ def _set_production_trial_env(monkeypatch) -> None:
     monkeypatch.setenv("ENV_PROFILE", "production_trial")
     monkeypatch.setenv("FEISHU_MOCK", "false")
     monkeypatch.setenv("LARK_DRY_RUN", "false")
+    monkeypatch.setenv("LARK_CLI_DRY_RUN", "false")
     monkeypatch.setenv("FEISHU_ENABLE_REAL_READ", "true")
+    monkeypatch.setenv("BITABLE_DRY_RUN", "false")
+    monkeypatch.setenv("TODO_PROJECTION_DRY_RUN", "false")
+    monkeypatch.setenv("RESOURCE_SEARCH_REAL_READ", "true")
+    monkeypatch.setenv("RESOURCE_SEARCH_DRY_RUN", "false")
     monkeypatch.setenv("TODO_BACKEND", "bitable")
     monkeypatch.setenv("FEISHU_BITABLE_APP_TOKEN", "app_token_for_test")
     monkeypatch.setenv("FEISHU_BITABLE_TABLE_ID", "table_for_test")

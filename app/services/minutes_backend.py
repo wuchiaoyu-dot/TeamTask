@@ -4,10 +4,10 @@ import json
 import logging
 import os
 import re
-import subprocess
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.clients.lark_cli_client import ensure_lark_cli_stdout, format_lark_cli_error, run_lark_cli_subprocess
 from app.config import Settings, get_settings
 from app.core.external_read_guard import mask_sensitive_resource_id, should_allow_external_read
 
@@ -74,7 +74,7 @@ class LarkCliMinutesBackend(MinutesBackend):
     def get_minutes_content(self, minutes_token_or_url: str) -> MinutesContent:
         logger.info(
             "LarkCliMinutesBackend get_minutes_content dry_run=%s real_read=%s token_or_url=%s",
-            self.settings.minutes_dry_run or self.settings.lark_dry_run,
+            self.settings.minutes_dry_run or not should_allow_external_read(self.settings),
             should_allow_external_read(self.settings),
             mask_sensitive_resource_id(minutes_token_or_url),
         )
@@ -101,17 +101,28 @@ class LarkCliMinutesBackend(MinutesBackend):
             "--as",
             "user" if self.settings.feishu_read_as_user else "bot",
         ]
-        logger.info("lark-cli minutes command=%s", _redact_command(command))
-        completed = subprocess.run(
-            command,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=self.settings.feishu_read_timeout_seconds,
+        redacted_command = _redact_command(command)
+        logger.info("lark-cli minutes command=%s", redacted_command)
+        completed = run_lark_cli_subprocess(command, timeout_seconds=self.settings.feishu_read_timeout_seconds)
+        logger.info(
+            "lark-cli minutes returncode=%s stdout=%s stderr=%s",
+            completed.returncode,
+            _redact_text(completed.stdout),
+            _redact_text(completed.stderr),
         )
         if completed.returncode != 0:
-            raise RuntimeError(f"lark-cli minutes failed: {completed.returncode} {_redact_text(completed.stderr)}")
-        content = parse_lark_cli_minutes_output(completed.stdout)
+            raise RuntimeError(
+                format_lark_cli_error(
+                    operation="minutes",
+                    command=redacted_command,
+                    returncode=completed.returncode,
+                    stdout=completed.stdout,
+                    stderr=completed.stderr,
+                    reason="non-zero exit",
+                )
+            )
+        stdout = ensure_lark_cli_stdout("minutes", completed, redacted_command)
+        content = parse_lark_cli_minutes_output(stdout)
         return MinutesContent(
             **{
                 **content.__dict__,
@@ -200,7 +211,8 @@ def _redact_command(command: list[str]) -> list[str]:
     return redacted
 
 
-def _redact_text(text: str) -> str:
+def _redact_text(text: str | None) -> str:
+    text = "" if text is None else str(text)
     redacted = text
     for name in ("FEISHU_APP_SECRET", "FEISHU_ACCESS_TOKEN", "LARK_ACCESS_TOKEN"):
         value = os.getenv(name)

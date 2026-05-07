@@ -3,12 +3,12 @@ from __future__ import annotations
 import json
 import logging
 import re
-import subprocess
 from abc import ABC, abstractmethod
 from typing import Any
 from uuid import uuid4
 
-from app.config import Settings, get_settings
+from app.clients.lark_cli_client import ensure_lark_cli_stdout, format_lark_cli_error, run_lark_cli_subprocess
+from app.config import Settings, get_settings, is_bitable_dry_run_enabled
 from app.core.external_write_guard import assert_external_write_allowed, should_allow_external_write
 
 logger = logging.getLogger(__name__)
@@ -67,9 +67,10 @@ class LarkCliBitableClient(BitableClient):
         self.settings = settings or get_settings()
 
     def create_record(self, app_token: str, table_id: str, fields: dict[str, Any]) -> str:
+        dry_run = is_bitable_dry_run_enabled(self.settings)
         logger.info(
             "LarkCliBitableClient create dry_run=%s command=%s fields=%s",
-            self.settings.lark_dry_run,
+            dry_run,
             _redact_args(_create_args(app_token, table_id, fields)),
             _redact_value(fields),
         )
@@ -80,9 +81,10 @@ class LarkCliBitableClient(BitableClient):
         return _record_id_from_result(result)
 
     def update_record(self, app_token: str, table_id: str, record_id: str, fields: dict[str, Any]) -> None:
+        dry_run = is_bitable_dry_run_enabled(self.settings)
         logger.info(
             "LarkCliBitableClient update dry_run=%s command=%s fields=%s",
-            self.settings.lark_dry_run,
+            dry_run,
             _redact_args(_update_args(app_token, table_id, record_id, fields)),
             _redact_value(fields),
         )
@@ -92,13 +94,13 @@ class LarkCliBitableClient(BitableClient):
         _run_lark_cli(self.settings, _update_args(app_token, table_id, record_id, fields), write=True)
 
     def get_record(self, app_token: str, table_id: str, record_id: str) -> dict[str, Any]:
-        if self.settings.lark_dry_run:
+        if is_bitable_dry_run_enabled(self.settings):
             return {"record_id": record_id, "fields": {}, "dry_run": True}
         result = _run_lark_cli(self.settings, _get_args(app_token, table_id, record_id), write=False)
         return _record_from_result(result)
 
     def search_records(self, app_token: str, table_id: str, filter_expr: str) -> list[dict[str, Any]]:
-        if self.settings.lark_dry_run:
+        if is_bitable_dry_run_enabled(self.settings):
             return []
         result = _run_lark_cli(self.settings, _search_args(app_token, table_id, filter_expr), write=False)
         records = result.get("items") or result.get("data", {}).get("items") or []
@@ -187,22 +189,42 @@ def _search_args(app_token: str, table_id: str, filter_expr: str) -> list[str]:
 
 def _run_lark_cli(settings: Settings, args: list[str], write: bool) -> dict[str, Any]:
     command = [settings.lark_cli_path, *args, "--as", "bot"]
-    if write and settings.lark_dry_run:
+    if write and is_bitable_dry_run_enabled(settings):
         command.append("--dry-run")
-    logger.info("lark-cli bitable command=%s", _redact_args(command))
-    completed = subprocess.run(
-        command,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=30,
+    redacted_command = _redact_args(command)
+    logger.info("lark-cli bitable command=%s", redacted_command)
+    completed = run_lark_cli_subprocess(command, timeout_seconds=30)
+    logger.info(
+        "lark-cli bitable returncode=%s stdout=%s stderr=%s",
+        completed.returncode,
+        _redact_text(completed.stdout),
+        _redact_text(completed.stderr),
     )
     if completed.returncode != 0:
-        raise RuntimeError(f"lark-cli bitable failed: {_redact_text(completed.stderr)}")
+        raise RuntimeError(
+            format_lark_cli_error(
+                operation="bitable",
+                command=redacted_command,
+                returncode=completed.returncode,
+                stdout=completed.stdout,
+                stderr=completed.stderr,
+                reason="non-zero exit",
+            )
+        )
+    stdout = ensure_lark_cli_stdout("bitable", completed, redacted_command)
     try:
-        parsed = json.loads(completed.stdout or "{}")
-    except json.JSONDecodeError:
-        return {"stdout": _redact_text(completed.stdout)}
+        parsed = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            format_lark_cli_error(
+                operation="bitable",
+                command=redacted_command,
+                returncode=completed.returncode,
+                stdout=completed.stdout,
+                stderr=completed.stderr,
+                reason="non-json stdout",
+            )
+        ) from exc
     return parsed if isinstance(parsed, dict) else {"data": parsed}
 
 
@@ -241,7 +263,8 @@ def _redact_args(args: list[str]) -> list[str]:
     return [_redact_text(arg) for arg in args]
 
 
-def _redact_text(text: str) -> str:
+def _redact_text(text: str | None) -> str:
+    text = "" if text is None else str(text)
     json_redacted = _redact_json_text(text)
     if json_redacted is not None:
         return json_redacted

@@ -203,20 +203,18 @@ class MockFeishuClient(FeishuClient):
 
 
 def create_feishu_client() -> FeishuClient:
-    if _env_bool("FEISHU_MOCK", default=True):
+    from app.config import get_settings, is_todo_projection_dry_run_enabled
+
+    settings = get_settings()
+    if settings.feishu_mock:
         return MockFeishuClient()
 
     from app.clients.lark_cli_client import LarkCliClient
 
     return LarkCliClient(
-        cli_path=os.getenv("LARK_CLI_PATH", "lark-cli"),
-        dry_run=_env_bool("LARK_DRY_RUN", default=True),
+        cli_path=settings.lark_cli_path,
+        dry_run=is_todo_projection_dry_run_enabled(settings),
+        send_dry_run=settings.feishu_send_dry_run,
         actor_mode=os.getenv("LARK_ACTOR_MODE", "as_bot"),
     )
 
-
-def _env_bool(name: str, default: bool) -> bool:
-    raw_value = os.getenv(name)
-    if raw_value is None:
-        return default
-    return raw_value.strip().lower() in {"1", "true", "yes", "on"}

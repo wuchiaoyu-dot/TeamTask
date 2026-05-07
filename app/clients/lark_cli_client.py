@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from app.models import TaskContract
 
 ActorMode = Literal["as_user", "as_bot"]
+ReceiveIdType = Literal["user_id", "open_id"]
 
 logger = logging.getLogger(__name__)
 SENSITIVE_MARKERS = ("token", "secret", "authorization", "access-token", "app-secret")
@@ -27,12 +28,19 @@ WRITE_OPERATIONS = {
     "create_bitable_record",
     "update_bitable_record",
 }
+SEND_OPERATIONS = {"send_message", "send_card", "send_group_message"}
+LARK_CLI_UTF8_ENV = {
+    "PYTHONIOENCODING": "utf-8",
+    "PYTHONUTF8": "1",
+    "LC_ALL": "C.UTF-8",
+}
 
 
 @dataclass(frozen=True)
 class LarkCliClient(FeishuClient):
     cli_path: str = "lark-cli"
     dry_run: bool = True
+    send_dry_run: bool | None = None
     actor_mode: ActorMode = "as_bot"
     timeout_seconds: int = 30
 
@@ -42,9 +50,13 @@ class LarkCliClient(FeishuClient):
 
     @classmethod
     def from_env(cls) -> LarkCliClient:
+        from app.config import get_settings, is_todo_projection_dry_run_enabled
+
+        settings = get_settings()
         return cls(
-            cli_path=os.getenv("LARK_CLI_PATH", "lark-cli"),
-            dry_run=_env_bool("LARK_DRY_RUN", default=True),
+            cli_path=settings.lark_cli_path,
+            dry_run=is_todo_projection_dry_run_enabled(settings),
+            send_dry_run=settings.feishu_send_dry_run,
             actor_mode=os.getenv("LARK_ACTOR_MODE", "as_bot"),
         )
 
@@ -55,6 +67,7 @@ class LarkCliClient(FeishuClient):
         return replace(self, actor_mode="as_bot")
 
     def send_message(self, user_id: str, text: str) -> dict[str, Any]:
+        receive_id_type = _receive_id_type(user_id)
         data = {
             "receive_id": user_id,
             "msg_type": "text",
@@ -65,13 +78,14 @@ class LarkCliClient(FeishuClient):
             "POST",
             "/open-apis/im/v1/messages",
             "--params",
-            json.dumps({"receive_id_type": "user_id"}, ensure_ascii=False),
+            json.dumps({"receive_id_type": receive_id_type}, ensure_ascii=False),
             "--data",
             json.dumps(data, ensure_ascii=False),
         ]
         return self._run("send_message", args, write=True)
 
     def send_card(self, user_id: str, card_json: dict[str, Any]) -> dict[str, Any]:
+        receive_id_type = _receive_id_type(user_id)
         rendered_card = render_feishu_card(card_json) if _is_internal_card(card_json) else card_json
         data = {
             "receive_id": user_id,
@@ -83,7 +97,7 @@ class LarkCliClient(FeishuClient):
             "POST",
             "/open-apis/im/v1/messages",
             "--params",
-            json.dumps({"receive_id_type": "user_id"}, ensure_ascii=False),
+            json.dumps({"receive_id_type": receive_id_type}, ensure_ascii=False),
             "--data",
             json.dumps(data, ensure_ascii=False, default=str),
         ]
@@ -206,12 +220,13 @@ class LarkCliClient(FeishuClient):
             raise ValueError(f"Unknown write operation: {operation}")
 
         command = [self.cli_path, *args, "--as", _cli_actor(self.actor_mode)]
-        if write and self.dry_run:
+        operation_dry_run = self._operation_dry_run(operation) if write else False
+        if write and operation_dry_run:
             command.append("--dry-run")
         redacted_command = _redact_args(command)
-        logger.info("lark-cli operation=%s dry_run=%s command=%s", operation, self.dry_run, redacted_command)
+        logger.info("lark-cli operation=%s dry_run=%s command=%s", operation, operation_dry_run, redacted_command)
 
-        if write and self.dry_run:
+        if write and operation_dry_run:
             return {
                 "dry_run": True,
                 "operation": operation,
@@ -224,47 +239,92 @@ class LarkCliClient(FeishuClient):
             check=False,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=_lark_cli_env(),
             timeout=self.timeout_seconds,
         )
         logger.info(
-            "lark-cli operation=%s returncode=%s stderr=%s",
+            "lark-cli operation=%s returncode=%s stdout=%s stderr=%s",
             operation,
             completed.returncode,
+            _redact_text(_output_text(completed.stdout)),
             _redact_text(completed.stderr),
         )
 
         if completed.returncode != 0:
+            logger.error(
+                "lark-cli operation=%s failed returncode=%s command=%s stdout=%s stderr=%s",
+                operation,
+                completed.returncode,
+                redacted_command,
+                _redact_text(_output_text(completed.stdout)),
+                _redact_text(completed.stderr),
+            )
             raise RuntimeError(
-                f"lark-cli failed for {operation}: returncode={completed.returncode} "
-                f"stderr={_redact_text(completed.stderr)}"
+                _format_lark_cli_error(
+                    operation=operation,
+                    command=redacted_command,
+                    returncode=completed.returncode,
+                    stdout=completed.stdout,
+                    stderr=completed.stderr,
+                    reason="non-zero exit",
+                )
             )
 
-        return _parse_cli_stdout(operation, completed.stdout, self.actor_mode, redacted_command)
+        return _parse_cli_stdout(
+            operation,
+            completed.stdout,
+            self.actor_mode,
+            redacted_command,
+            stderr=completed.stderr,
+            returncode=completed.returncode,
+        )
+
+    def _operation_dry_run(self, operation: str) -> bool:
+        if operation in SEND_OPERATIONS:
+            return self.dry_run if self.send_dry_run is None else self.send_dry_run
+        return self.dry_run
 
 
 def _parse_cli_stdout(
     operation: str,
-    stdout: str,
+    stdout: str | None,
     actor_mode: ActorMode,
     redacted_command: list[str],
+    stderr: str | None = None,
+    returncode: int = 0,
 ) -> dict[str, Any]:
-    text = stdout.strip()
+    raw_stdout = _output_text(stdout)
+    text = raw_stdout.strip()
     if not text:
-        return {
-            "operation": operation,
-            "actor_mode": actor_mode,
-            "command": redacted_command,
-            "stdout": "",
-        }
+        raise RuntimeError(
+            _format_lark_cli_error(
+                operation=operation,
+                command=redacted_command,
+                returncode=returncode,
+                stdout=stdout,
+                stderr=stderr,
+                reason="empty stdout",
+            )
+        )
 
     try:
         parsed = json.loads(text)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
+        logger.warning(
+            "lark-cli operation=%s produced non-json stdout=%s stderr=%s",
+            operation,
+            _redact_text(raw_stdout),
+            _redact_text(stderr),
+        )
         return {
             "operation": operation,
             "actor_mode": actor_mode,
             "command": redacted_command,
-            "stdout": _redact_text(text),
+            "stdout": _redact_text(raw_stdout),
+            "stderr": _redact_text(stderr),
+            "parse_error": str(exc),
         }
 
     if isinstance(parsed, dict):
@@ -280,12 +340,87 @@ def _parse_cli_stdout(
     }
 
 
+def _lark_cli_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env.update(LARK_CLI_UTF8_ENV)
+    return env
+
+
+def run_lark_cli_subprocess(command: list[str], timeout_seconds: int) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        command,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=_lark_cli_env(),
+        timeout=timeout_seconds,
+    )
+
+
+def ensure_lark_cli_stdout(
+    operation: str,
+    completed: subprocess.CompletedProcess[str],
+    redacted_command: list[str],
+) -> str:
+    stdout = _output_text(completed.stdout)
+    if stdout.strip():
+        return stdout
+    raise RuntimeError(
+        _format_lark_cli_error(
+            operation=operation,
+            command=redacted_command,
+            returncode=completed.returncode,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+            reason="empty stdout",
+        )
+    )
+
+
+def format_lark_cli_error(
+    operation: str,
+    command: list[str],
+    returncode: int,
+    stdout: str | None,
+    stderr: str | None,
+    reason: str,
+) -> str:
+    return _format_lark_cli_error(
+        operation=operation,
+        command=command,
+        returncode=returncode,
+        stdout=stdout,
+        stderr=stderr,
+        reason=reason,
+    )
+
+
+def _format_lark_cli_error(
+    operation: str,
+    command: list[str],
+    returncode: int,
+    stdout: str | None,
+    stderr: str | None,
+    reason: str,
+) -> str:
+    return (
+        f"lark-cli failed for {operation}: reason={reason}; returncode={returncode}; "
+        f"command={command}; stdout={_redact_text(_output_text(stdout))}; stderr={_redact_text(stderr)}"
+    )
+
+
 def _is_internal_card(card_json: dict[str, Any]) -> bool:
     return "card_type" in card_json and "actions" in card_json and "task_fields" in card_json
 
 
 def _cli_actor(actor_mode: ActorMode) -> str:
     return "user" if actor_mode == "as_user" else "bot"
+
+
+def _receive_id_type(receive_id: str) -> ReceiveIdType:
+    return "open_id" if receive_id.startswith("ou_") else "user_id"
 
 
 def _redact_args(args: list[str]) -> list[str]:
@@ -303,7 +438,12 @@ def _redact_args(args: list[str]) -> list[str]:
     return redacted
 
 
-def _redact_text(text: str) -> str:
+def _output_text(value: str | None) -> str:
+    return "" if value is None else str(value)
+
+
+def _redact_text(text: str | None) -> str:
+    text = _output_text(text)
     json_redacted = _redact_json_text(text)
     if json_redacted is not None:
         return json_redacted
@@ -358,10 +498,3 @@ def _redact_json_value(value: Any) -> Any:
     if isinstance(value, str):
         return _redact_text(value)
     return value
-
-
-def _env_bool(name: str, default: bool) -> bool:
-    raw_value = os.getenv(name)
-    if raw_value is None:
-        return default
-    return raw_value.strip().lower() in {"1", "true", "yes", "on"}

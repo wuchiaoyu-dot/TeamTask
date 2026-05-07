@@ -20,7 +20,14 @@ from app.cards import (
     build_reconciliation_summary_card,
 )
 from app.clients import create_feishu_client
-from app.config import get_settings, validate_bitable_config, validate_env_profile, validate_real_read_config
+from app.config import (
+    get_settings,
+    is_bitable_dry_run_enabled,
+    is_todo_projection_dry_run_enabled,
+    validate_bitable_config,
+    validate_env_profile,
+    validate_real_read_config,
+)
 from app.core.access_guard import (
     assert_chat_allowed,
     assert_user_allowed,
@@ -144,6 +151,7 @@ from app.state_machine import (
 INITIATOR_ACTIONS = {
     "initiator_confirm",
     "initiator_ignore",
+    "initiator_edit_task",
     "initiator_request_resource_search",
     "progress_select_task",
     "change_proposal_approve",
@@ -191,7 +199,12 @@ def health() -> dict:
         "env_profile": settings.env_profile,
         "feishu_mock": settings.feishu_mock,
         "lark_dry_run": settings.lark_dry_run,
+        "lark_cli_dry_run": settings.lark_cli_dry_run,
+        "feishu_send_dry_run": settings.feishu_send_dry_run,
+        "bitable_dry_run": is_bitable_dry_run_enabled(settings),
+        "todo_projection_dry_run": is_todo_projection_dry_run_enabled(settings),
         "real_read_enabled": settings.feishu_enable_real_read,
+        "task_extractor_backend": settings.task_extractor_backend,
         "todo_backend": settings.todo_backend,
         "minutes_backend": settings.minutes_backend,
         "resource_search_backend": settings.resource_search_backend,
@@ -261,7 +274,14 @@ def debug_system_status() -> dict:
         "runtime": {
             "feishu_mock": settings.feishu_mock,
             "lark_dry_run": settings.lark_dry_run,
+            "lark_cli_dry_run": settings.lark_cli_dry_run,
+            "feishu_send_dry_run": settings.feishu_send_dry_run,
+            "bitable_dry_run": is_bitable_dry_run_enabled(settings),
+            "todo_projection_dry_run": is_todo_projection_dry_run_enabled(settings),
             "real_read_enabled": settings.feishu_enable_real_read,
+            "resource_search_real_read": settings.resource_search_real_read,
+            "task_extractor_backend": settings.task_extractor_backend,
+            "task_extractor_llm_fallback": settings.task_extractor_llm_fallback,
             "todo_backend": settings.todo_backend,
             "minutes_backend": settings.minutes_backend,
             "resource_search_backend": settings.resource_search_backend,
@@ -274,6 +294,9 @@ def debug_system_status() -> dict:
             "bitable_app_token": bool(settings.feishu_bitable_app_token),
             "bitable_table_id": bool(settings.feishu_bitable_table_id),
             "lark_cli_path": bool(settings.lark_cli_path),
+            "llm_task_api_base": bool(settings.llm_task_api_base),
+            "llm_task_api_key": bool(settings.llm_task_api_key),
+            "llm_task_model": bool(settings.llm_task_model),
             "allowed_user_count": len(settings.allowed_user_ids),
             "allowed_chat_count": len(settings.allowed_chat_ids),
         },
@@ -372,6 +395,8 @@ def feishu_card_callback(payload: dict, db: Session = Depends(get_db)) -> dict:
         return _handle_initiator_confirm(callback.recipient_user_id, callback.contract_id, db)
     if callback.action_key == "initiator_ignore":
         return _handle_initiator_ignore(callback.recipient_user_id, callback.contract_id, db)
+    if callback.action_key == "initiator_edit_task":
+        return _handle_initiator_edit_task(callback.recipient_user_id, callback.contract_id, db)
     if callback.action_key == "assignee_accept":
         return _handle_assignee_accept(callback.recipient_user_id, callback.contract_id, db)
     if callback.action_key == "assignee_ignore":
@@ -633,7 +658,7 @@ def debug_bitable_create_real(payload: DebugBitableCreateRealIn, db: Session = D
 @app.post("/debug/bitable/get-record")
 def debug_bitable_get_record(payload: DebugBitableGetRecordIn) -> dict:
     settings = get_settings()
-    if settings.feishu_mock or settings.lark_dry_run:
+    if settings.feishu_mock or is_todo_projection_dry_run_enabled(settings):
         raw_record = {
             "record_id": payload.external_record_id,
             "fields": {},
@@ -653,7 +678,7 @@ def debug_bitable_get_record(payload: DebugBitableGetRecordIn) -> dict:
 def debug_bitable_update_record(payload: DebugBitableUpdateRecordIn) -> dict:
     settings = get_settings()
     fields = map_patch_to_bitable_fields(payload.patch, settings)
-    if settings.feishu_mock or settings.lark_dry_run or not should_allow_external_write(settings):
+    if settings.feishu_mock or is_todo_projection_dry_run_enabled(settings) or not should_allow_external_write(settings):
         raw_record = {"record_id": payload.external_record_id, "fields": fields, "dry_run": True}
         return {
             "updated_fields": fields,
@@ -708,6 +733,7 @@ def debug_minutes_extract_tasks(payload: DebugMinutesExtractTasksIn) -> dict:
     candidates = extract_task_candidates(source_event, event_payload)
     return {
         "minutes_token_or_url": payload.minutes_token_or_url,
+        "task_extractor_backend": get_settings().task_extractor_backend,
         "normalized": event_payload.parsed_context_json,
         "task_candidates": [candidate.model_dump(mode="json") for candidate in candidates],
     }
@@ -1002,6 +1028,25 @@ def _handle_initiator_ignore(actor_user_id: str, contract_id: int, db: Session) 
     db.commit()
     db.refresh(contract)
     return {"contract_id": contract.id, "status": contract.status, "idempotent": bool(existing_action)}
+
+
+def _handle_initiator_edit_task(actor_user_id: str, contract_id: int, db: Session) -> dict:
+    contract = _get_contract(db, contract_id)
+    actor = get_or_create_user(db, actor_user_id)
+    if not can_confirm_as_initiator(actor, contract):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only the initiator can edit")
+
+    existing_action = get_existing_card_action(db, "initiator_edit_task", actor.id, contract.id)
+    if not existing_action:
+        record_card_action(db, "initiator_edit_task", actor.id, contract.id, {"edit_requested": True})
+    db.commit()
+    db.refresh(contract)
+    return {
+        "contract_id": contract.id,
+        "status": contract.status,
+        "edit_requested": True,
+        "idempotent": bool(existing_action),
+    }
 
 
 def _handle_assignee_accept(actor_user_id: str, contract_id: int, db: Session) -> dict:

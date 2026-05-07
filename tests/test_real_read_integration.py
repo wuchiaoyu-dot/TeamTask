@@ -214,6 +214,7 @@ def test_lark_cli_resource_search_deduplicates_by_url(
         feishu_enable_real_read=True,
         resource_search_backend="lark_cli",
         resource_search_dry_run=False,
+        resource_search_real_read=True,
         resource_search_sources=("docs",),
         lark_cli_path="lark-cli",
     )

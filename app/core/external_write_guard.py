@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 
-from app.config import Settings, get_settings, validate_bitable_config
+from app.config import Settings, get_settings, is_todo_projection_dry_run_enabled, validate_bitable_config
 
 
 def should_allow_external_write(settings: Settings | None = None) -> bool:
@@ -11,7 +11,7 @@ def should_allow_external_write(settings: Settings | None = None) -> bool:
         return False
     if settings.feishu_mock:
         return False
-    if settings.lark_dry_run:
+    if is_todo_projection_dry_run_enabled(settings):
         return False
     if settings.todo_backend != "bitable":
         return False
@@ -28,5 +28,6 @@ def assert_external_write_allowed(settings: Settings | None = None) -> None:
     if not should_allow_external_write(settings):
         raise PermissionError(
             "External Bitable writes are disabled. Require FEISHU_MOCK=false, "
-            "LARK_DRY_RUN=false, TODO_BACKEND=bitable, valid Bitable config, and non-test runtime."
+            "BITABLE_DRY_RUN=false, TODO_PROJECTION_DRY_RUN=false, TODO_BACKEND=bitable, "
+            "valid Bitable config, and non-test runtime."
         )

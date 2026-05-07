@@ -10,10 +10,16 @@ Use `.env.staging.example` as the starting point:
 ENV_PROFILE=staging_dry_run
 FEISHU_MOCK=false
 LARK_DRY_RUN=true
+LARK_CLI_DRY_RUN=false
+FEISHU_SEND_DRY_RUN=false
+BITABLE_DRY_RUN=true
+TODO_PROJECTION_DRY_RUN=true
 FEISHU_ENABLE_REAL_READ=false
 TODO_BACKEND=bitable
 MINUTES_BACKEND=lark_cli
 RESOURCE_SEARCH_BACKEND=lark_cli
+RESOURCE_SEARCH_REAL_READ=false
+RESOURCE_SEARCH_DRY_RUN=true
 ```
 
 Optional real-read dry-run:
@@ -21,6 +27,7 @@ Optional real-read dry-run:
 ```dotenv
 FEISHU_ENABLE_REAL_READ=true
 MINUTES_DRY_RUN=true
+RESOURCE_SEARCH_REAL_READ=false
 RESOURCE_SEARCH_DRY_RUN=true
 ```
 
@@ -42,6 +49,12 @@ PUBLIC_BASE_URL=https://your-public-url.example
 
 ```powershell
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+```
+
+For Feishu WebSocket long-connection staging, start the runner instead of the public HTTP tunnel:
+
+```powershell
+python -m app.runners.feishu_ws_runner
 ```
 
 ## 3. Public HTTPS
@@ -118,8 +131,10 @@ Feishu checks:
 
 ## 6. Safety Expectations
 
-- `LARK_DRY_RUN=true` means no real Bitable writes.
-- `LARK_DRY_RUN=true` means no real Todo mutation.
+- `LARK_CLI_DRY_RUN=false` / `FEISHU_SEND_DRY_RUN=false` means confirmation cards are really sent.
+- `BITABLE_DRY_RUN=true` means no real Bitable writes.
+- `TODO_PROJECTION_DRY_RUN=true` means no real Todo Projection mutation.
+- `RESOURCE_SEARCH_REAL_READ=false` and `RESOURCE_SEARCH_DRY_RUN=true` keep resource search on mock/dry-run reads.
 - Non-allowlisted users are rejected in guarded real paths.
 - Non-allowlisted chats are rejected in `production_trial` and guarded staging paths.
 - Tokens, secrets, authorization headers, app tokens, document tokens, and minutes tokens must not appear in logs.
